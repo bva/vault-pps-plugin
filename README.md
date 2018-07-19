@@ -1,6 +1,6 @@
 # Vault plugin for Pleasant Password Server
 
-Plugin for Vault which connect it to Pleasant Password Server.
+Plugin for Hashicorp's Vault, which connect it to Pleasant Password Server.
 
 ## Installation
 
