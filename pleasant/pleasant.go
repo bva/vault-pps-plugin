@@ -65,9 +65,12 @@ type CredentialGroup struct {
 	Expires string `json:",omitempty"`
 	CustomUserFields map[string]string `json:",omitempty"`
 	CustomApplicationFields map[string]string `json:",omitempty"`
+	Attachments []Attachment `json:",omitempty"`
 
 	Children []CredentialGroup
 	Credentials []Credential
+	Tags []Tag `json:",omitempty"`
+	UsageComment string `json:"UsageComment"`
 
 	HasModifyEntriesAccess bool `json:"HasModifyEntriesAccess"`
 	HasViewEntryContentsAccess bool `json:"HasViewEntryContentsAccess"`
@@ -211,7 +214,7 @@ func delete_empty (s []string) []string {
 	return r
 }
 
-func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
+func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential, string) {
 	b := p.backend
 
 	b.Logger().Debug("Read", path)
@@ -223,12 +226,11 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 	node := p.RequestRootCredentialGroup(false)
 
 	if(len(path_splitted) == 0) {
-		return node, nil
+		return node, nil, ""
 	}
 
 	for _, name := range path_splitted[:len(path_splitted) - 1] {
 		b.Logger().Debug("Iterate", name)
-		path_rest = path_rest[1:]
 		b.Logger().Debug("PathRest", fmt.Sprintf("%v", path_rest))
 
 		for _, group := range node.Children {
@@ -242,19 +244,28 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 
 		if (name != node.Name) {
 			b.Logger().Debug("Group not found", name)
-			return nil, nil
+			break
 		}
+
+		path_rest = path_rest[1:]
 	}
 
 	last_leaf := path_rest[0]
+	extra_path := ""
+
+	if len(path_rest) > 1 {
+		extra_path = strings.Join(path_rest[1:],"/")
+	}
+
+	b.Logger().Debug("ExtraPath", extra_path)
 	b.Logger().Debug("LastLeaf", last_leaf)
 
 	for _, group := range node.Children {
-		b.Logger().Debug("LastLeaf check group", fmt.Sprintf("%v", group))
+		b.Logger().Debug("LastLeaf check group", group.Name)
 
 		if (group.Name == last_leaf) {
 			b.Logger().Debug("LastLeaf is CredentialGroup", group.Name)
-			return p.RequestCredentialGroup(group.Id), nil
+			return p.RequestCredentialGroup(group.Id), nil, extra_path
 		}
 	}
 
@@ -264,12 +275,12 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 
 			updated_credential := p.RequestCredential(credential.Id)
 			updated_credential.Password = p.RequestCredentialPassword(credential.Id)
-			return node, updated_credential
+			return node, updated_credential, extra_path
 		}
 	}
 
 	b.Logger().Debug("LastLeaf not found", last_leaf)
-	return nil, nil
+	return nil, nil, ""
 
 }
 
