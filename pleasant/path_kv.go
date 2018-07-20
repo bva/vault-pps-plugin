@@ -107,8 +107,10 @@ func (b *backend) credentialRead(credential *Credential, extra_path string) (map
 
 		if(credential.Name != "") {
 			d["name"] = credential.Name
+		} else if credential.UserName != "" {
+			d["name"] = credential.UserName + "[" + credential.Id + "]"
 		} else {
-			d["name"] = credential.Id
+			d["name"] = "[" + credential.Id + "]"
 		}
 
 		if(credential.Password != "") {
@@ -428,13 +430,8 @@ func (b *backend) pathKVList(ctx context.Context, req *logical.Request, data *fr
 		}
 
 		for _, credential := range group.Credentials {
-			name := credential.Name
-
-			if(name == "") {
-				name = credential.Id
-			}
-
-			vals = append(vals, name + "/")
+			updated_credential := b.credentialRead(&credential, "fields")
+			vals = append(vals, updated_credential["name"].(string) + "/")
 		}
 	}
 

@@ -260,22 +260,32 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential, string) {
 	b.Logger().Debug("ExtraPath", extra_path)
 	b.Logger().Debug("LastLeaf", last_leaf)
 
+	for _, credential := range node.Credentials {
+		if ( credential.Name == last_leaf) {
+			b.Logger().Debug("LastLeaf is Credential", credential.Name)
+
+			updated_credential := p.RequestCredential(credential.Id)
+			updated_credential.Password = p.RequestCredentialPassword(credential.Id)
+			return node, updated_credential, extra_path
+		}
+	}
+
+	for _, credential := range node.Credentials {
+		if  credential.UserName+"["+credential.Id+"]" == last_leaf {
+			b.Logger().Debug("LastLeaf is Credential (by UserName and Id)", credential.UserName+"-"+credential.Id)
+
+			updated_credential := p.RequestCredential(credential.Id)
+			updated_credential.Password = p.RequestCredentialPassword(credential.Id)
+			return node, updated_credential, extra_path
+		}
+	}
+
 	for _, group := range node.Children {
 		b.Logger().Debug("LastLeaf check group", group.Name)
 
 		if (group.Name == last_leaf) {
 			b.Logger().Debug("LastLeaf is CredentialGroup", group.Name)
 			return p.RequestCredentialGroup(group.Id), nil, extra_path
-		}
-	}
-
-	for _, credential := range node.Credentials {
-		if (credential.Id == last_leaf || credential.Name == last_leaf) {
-			b.Logger().Debug("LastLeaf is Credential", credential.Name)
-
-			updated_credential := p.RequestCredential(credential.Id)
-			updated_credential.Password = p.RequestCredentialPassword(credential.Id)
-			return node, updated_credential, extra_path
 		}
 	}
 
