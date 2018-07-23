@@ -21,12 +21,9 @@ func kvPaths(b *backend) []*framework.Path {
 				"password":  &framework.FieldSchema{Type: framework.TypeString},
 				"notes":     &framework.FieldSchema{Type: framework.TypeString},
 				"url":   &framework.FieldSchema{Type: framework.TypeString},
-				"value":   &framework.FieldSchema{Type: framework.TypeKVPairs},
 				"created":   &framework.FieldSchema{Type: framework.TypeString},
 				"modified":  &framework.FieldSchema{Type: framework.TypeString},
 				"expires":   &framework.FieldSchema{Type: framework.TypeString},
-				"custom_fields":   &framework.FieldSchema{Type: framework.TypeKVPairs},
-				"attachments":   &framework.FieldSchema{Type: framework.TypeKVPairs},
 			},
 			ExistenceCheck: b.pathExistenceCheck,
 
@@ -302,12 +299,6 @@ func (b *backend) credentialGroupUpdate(group *CredentialGroup, data *framework.
 	if(data.Get("notes") != "") {
 		group.Notes = data.Get("notes").(string)
 	}
-
-	custom_fields := data.Get("custom_fields").(map[string]string)
-
-	if(len(custom_fields) > 0) {
-		group.CustomUserFields = custom_fields
-	}
 }
 
 func (b *backend) pathKVCreate(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
@@ -316,19 +307,18 @@ func (b *backend) pathKVCreate(ctx context.Context, req *logical.Request, data *
 	pleasant, _ := b.Session(ctx, req.Storage)
 
 	path_splitted := delete_empty(strings.Split(req.Path, "/"))
-	name := path_splitted[len(path_splitted) - 1]
-	path_splitted = path_splitted[0:len(path_splitted) - 1]
+	path_splitted = path_splitted[0:len(path_splitted)]
 
-	b.Logger().Debug("New", name, strings.Join(path_splitted, "/"))
+	b.Logger().Debug("New", strings.Join(path_splitted, "/"))
 
-	group, credential, extra_path := pleasant.Read(strings.Join(path_splitted, "/"))
+	if !extra_path_valid(path_splitted[len(path_splitted) - 1], false) {
+		group, credential, _ := pleasant.Read(strings.Join(path_splitted[0:len(path_splitted) - 1], "/"))
 
-	if(group != nil && credential == nil && extra_path_valid(extra_path, true)) {
-		if(data.Get("group").(bool)) {
-			new_group := &CredentialGroup{ Name: name, ParentId: group.Id}
+		if(group != nil && credential == nil) {
+			new_group := &CredentialGroup{ Name: path_splitted[len(path_splitted) - 1], ParentId: group.Id}
 
 			b.credentialGroupUpdate(new_group, data)
-			new_group.Name = name
+			new_group.Name = path_splitted[len(path_splitted) - 1]
 
 			pleasant.CreateCredentialGroup(new_group)
 
@@ -337,11 +327,19 @@ func (b *backend) pathKVCreate(ctx context.Context, req *logical.Request, data *
 			return &logical.Response{
 				Data: b.credentialGroupRead(new_group),
 			}, nil
-		} else if (extra_path_valid(extra_path, true) && (extra_path == "" || extra_path == "fields")) {
+		}
+
+		return nil, logical.ErrUnsupportedPath
+	}
+
+	if extra_path_valid(path_splitted[len(path_splitted) - 1], false) && path_splitted[len(path_splitted) - 1] == "fields" {
+		group, credential, _ := pleasant.Read(strings.Join(path_splitted[0:len(path_splitted) - 2], "/"))
+
+		if(group != nil && credential == nil) {
 			new_credential := &Credential{GroupId: group.Id}
 
 			b.credentialUpdate(new_credential, data, "fields")
-			new_credential.Name = name
+			new_credential.Name = path_splitted[len(path_splitted) - 2]
 			pleasant.CreateCredential(new_credential)
 
 			_, new_credential, _ = pleasant.Read(req.Path)
@@ -425,14 +423,27 @@ func (b *backend) pathKVList(ctx context.Context, req *logical.Request, data *fr
 		vals = append(vals, "custom_fields")
 		vals = append(vals, "attachments")
 	} else {
+		entries := make(map[string][]string)
+
 		for _, group := range group.Children {
-			vals = append(vals, group.Name + "/")
+			entries[group.Name] = append(entries[group.Name], group.Id)
 		}
 
 		for _, credential := range group.Credentials {
 			updated_credential := b.credentialRead(&credential, "fields")
-			vals = append(vals, updated_credential["name"].(string) + "/")
+			entries[updated_credential["name"].(string)] = append(entries[updated_credential["name"].(string)], updated_credential["id"].(string))
 		}
+
+		for name, list := range entries {
+			if len(list) > 1 {
+				for _, id := range list {
+					vals = append(vals, name + "[" + id + "]/")
+				}
+			} else {
+				vals = append(vals, name + "/")
+			}
+		}
+
 	}
 
 	return logical.ListResponse(vals), nil
