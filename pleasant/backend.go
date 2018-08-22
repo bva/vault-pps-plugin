@@ -49,7 +49,6 @@ func Backend() *backend {
 		},
 
 		Paths: framework.PathAppend(
-			errorPaths(&b),
 			pathConfigAccess(&b),
 			kvPaths(&b),
 		),
@@ -64,17 +63,19 @@ func Backend() *backend {
 }
 
 func (b *backend) Session(ctx context.Context, s logical.Storage) (*Pleasant, error) {
-	b.Logger().Debug("Session")
+	logger := b.Logger()
+
+	logger.Debug("Session")
         b.lock.Lock()
         defer b.lock.Unlock()
 
         if b.pleasant != nil {
-		b.Logger().Debug("Returning cached pleasant session")
+		logger.Debug("Returning cached pleasant session")
 		return b.pleasant, nil
         }
 
 	accessConfig, err :=  b.readConfigAccess(ctx, s)
-	b.Logger().Debug("Creating new pleasant session")
+	logger.Debug("Creating new pleasant session")
 
         if err != nil {
                 return nil, err
@@ -93,13 +94,10 @@ func (b *backend) ResetSession(_ context.Context) {
         b.lock.Lock()
         defer b.lock.Unlock()
 
-	b.Logger().Debug("ResetSession1")
         if b.pleasant != nil {
 		b.Logger().Debug("Logging out from Pleasant")
                 b.pleasant.Logout()
         }
-
-	b.Logger().Debug("ResetSession2")
 
         b.pleasant = nil
 }

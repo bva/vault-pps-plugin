@@ -103,7 +103,9 @@ func NewPleasant(backend logical.Backend) *Pleasant {
 func (p *Pleasant) Login(url, username, password string) *Pleasant {
 	p.resty.SetHostURL(url).SetHeaders(map[string]string{
 		"Content-Type": "application/json",
-		"Accept": "application/json", })
+		"Accept": "application/json",
+		"Accept-Encoding": "gzip",
+	})
 
 	resp, _ := p.resty.R().SetFormData(map[string]string{
 		"grant_type": "password",
@@ -177,27 +179,31 @@ func (p *Pleasant) RequestRootCredentialGroup(invalidate bool) *CredentialGroup 
 	root = p.RequestCredentialGroup("")
 	p.root.Store(root)
 
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		duration := time.Duration(5*60) * time.Second
+	if !invalidate {
+		go func() {
+			p.backend.Logger().Debug("Starting cached RootCredentialGroup goroutine")
 
-		for range ticker.C {
-			duration -= time.Second
+			ticker := time.NewTicker(time.Second)
+			duration := time.Duration(5*60) * time.Second
 
-			select {
-			case <- p.recredential_quit:
-				p.backend.Logger().Debug("Timer cached RootCredentialGroup cancelled")
-				return
+			for range ticker.C {
+				duration -= time.Second
 
-			default:
-				if duration <= 0 {
-					p.backend.Logger().Debug("Timer cached RootCredentialGroup")
-					p.root.Store(p.RequestCredentialGroup(""))
-					duration = time.Duration(5*60) * time.Second
+				select {
+				case <- p.recredential_quit:
+					p.backend.Logger().Debug("Timer cached RootCredentialGroup cancelled")
+					return
+
+				default:
+					if duration <= 0 {
+						p.backend.Logger().Debug("Timer cached RootCredentialGroup")
+						p.root.Store(p.RequestCredentialGroup(""))
+						duration = time.Duration(5*60) * time.Second
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 
 	return root.(*CredentialGroup)
 }
@@ -214,7 +220,7 @@ func delete_empty (s []string) []string {
 	return r
 }
 
-func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential, string) {
+func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 	b := p.backend
 
 	b.Logger().Debug("Read", path)
@@ -226,7 +232,7 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential, string) {
 	node := p.RequestRootCredentialGroup(false)
 
 	if(len(path_splitted) == 0) {
-		return node, nil, ""
+		return node, nil
 	}
 
 	for _, name := range path_splitted[:len(path_splitted) - 1] {
@@ -251,13 +257,6 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential, string) {
 	}
 
 	last_leaf := path_rest[0]
-	extra_path := ""
-
-	if len(path_rest) > 1 {
-		extra_path = strings.Join(path_rest[1:],"/")
-	}
-
-	b.Logger().Debug("ExtraPath", extra_path)
 	b.Logger().Debug("LastLeaf", last_leaf)
 
 	for _, credential := range node.Credentials {
@@ -266,9 +265,9 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential, string) {
 		if ( credential.Name == last_leaf) {
 			b.Logger().Debug("LastLeaf is Credential", credential.Name)
 
-			updated_credential := p.RequestCredential(credential.Id)
-			updated_credential.Password = p.RequestCredentialPassword(credential.Id)
-			return node, updated_credential, extra_path
+//			updated_credential := p.RequestCredential(credential.Id)
+			updated_credential := &credential
+			return node, updated_credential
 		}
 	}
 
@@ -278,21 +277,9 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential, string) {
 		if  credential.Name+"["+credential.Id+"]" == last_leaf {
 			b.Logger().Debug("LastLeaf is Credential (by UserName and Id)", credential.UserName+"-"+credential.Id)
 
-			updated_credential := p.RequestCredential(credential.Id)
-			updated_credential.Password = p.RequestCredentialPassword(credential.Id)
-			return node, updated_credential, extra_path
-		}
-	}
-
-	for _, credential := range node.Credentials {
-		b.Logger().Debug("LastLeaf check credential", credential.UserName)
-
-		if  credential.UserName+"["+credential.Id+"]" == last_leaf {
-			b.Logger().Debug("LastLeaf is Credential (by UserName and Id)", credential.UserName+"-"+credential.Id)
-
-			updated_credential := p.RequestCredential(credential.Id)
-			updated_credential.Password = p.RequestCredentialPassword(credential.Id)
-			return node, updated_credential, extra_path
+//			updated_credential := p.RequestCredential(credential.Id)
+			updated_credential := &credential
+			return node, updated_credential
 		}
 	}
 
@@ -301,13 +288,13 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential, string) {
 
 		if (group.Name == last_leaf || group.Name + "[" + group.Id + "]" == last_leaf) {
 			b.Logger().Debug("LastLeaf is CredentialGroup", group.Name)
-			return p.RequestCredentialGroup(group.Id), nil, extra_path
+			//			return p.RequestCredentialGroup(group.Id), nil, extra_path
+			return &group, nil
 		}
 	}
 
 	b.Logger().Debug("LastLeaf not found", last_leaf)
-	return nil, nil, ""
-
+	return nil, nil
 }
 
 func (p *Pleasant) RequestCredentialGroup(id string) *CredentialGroup {

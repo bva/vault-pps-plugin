@@ -3,7 +3,6 @@ package pleasant
 import (
 	"context"
 	"strings"
-	"regexp"
 	"github.com/hashicorp/vault/logical"
 	"github.com/hashicorp/vault/logical/framework"
 )
@@ -15,15 +14,16 @@ func kvPaths(b *backend) []*framework.Path {
 		&framework.Path{
 			Pattern: ".*",
 			Fields: map[string]*framework.FieldSchema{
-				"id":     &framework.FieldSchema{Type: framework.TypeString},
-				"name":     &framework.FieldSchema{Type: framework.TypeString},
-				"user_name":     &framework.FieldSchema{Type: framework.TypeString},
-				"password":  &framework.FieldSchema{Type: framework.TypeString},
-				"notes":     &framework.FieldSchema{Type: framework.TypeString},
-				"url":   &framework.FieldSchema{Type: framework.TypeString},
-				"created":   &framework.FieldSchema{Type: framework.TypeString},
-				"modified":  &framework.FieldSchema{Type: framework.TypeString},
-				"expires":   &framework.FieldSchema{Type: framework.TypeString},
+				"Id":     &framework.FieldSchema{Type: framework.TypeString},
+				"Name":     &framework.FieldSchema{Type: framework.TypeString},
+				"UserName":     &framework.FieldSchema{Type: framework.TypeString},
+				"Password":  &framework.FieldSchema{Type: framework.TypeString},
+				"Notes":     &framework.FieldSchema{Type: framework.TypeString},
+				"Url":   &framework.FieldSchema{Type: framework.TypeString},
+				"Created":   &framework.FieldSchema{Type: framework.TypeString},
+				"Modified":  &framework.FieldSchema{Type: framework.TypeString},
+				"Group":   &framework.FieldSchema{Type: framework.TypeString},
+				"Expires":   &framework.FieldSchema{Type: framework.TypeString},
 			},
 			ExistenceCheck: b.pathExistenceCheck,
 
@@ -38,43 +38,13 @@ func kvPaths(b *backend) []*framework.Path {
 	}
 }
 
-func extra_path_valid(extra_path string, strict bool) bool {
-	if extra_path == "" {
-		return true
-	}
-
-	if strict {
-		matched, err := regexp.MatchString("^(custom_)?fields$", extra_path)
-		if matched && err == nil {
-			return true
-		}
-
-		matched, err = regexp.MatchString("^attachments$", extra_path)
-		if matched && err == nil {
-			return true
-		}
-	} else {
-		matched, err := regexp.MatchString("^(custom_)?fields(/)?.*", extra_path)
-		if matched && err == nil {
-			return true
-		}
-
-		matched, err = regexp.MatchString("^attachments(/)?.*", extra_path)
-		if matched && err == nil {
-			return true
-		}
-	}
-
-	return false
-}
-
 func (b *backend) pathExistenceCheck(ctx context.Context, req *logical.Request, data *framework.FieldData) (bool, error) {
-	b.Logger().Debug("ExistenceCheck: ", req.Path)
+	b.Logger().Debug("ExistenceCheck path " + req.Path)
 
 	pleasant, _ := b.Session(ctx, req.Storage)
-	group, credential, extra_path := pleasant.Read(req.Path)
+	group, credential := pleasant.Read(req.Path)
 
-	if((group == nil && credential == nil) || !extra_path_valid(extra_path, false)) {
+	if(group == nil && credential == nil) {
 		b.Logger().Debug("Path does not exist", req.Path)
 		return false, nil
 	}
@@ -82,78 +52,41 @@ func (b *backend) pathExistenceCheck(ctx context.Context, req *logical.Request, 
 	return true, nil
 }
 
-func (b *backend) credentialRead(credential *Credential, extra_path string) (map[string]interface{}) {
-	d := map[string]interface{} {}
+func (b *backend) credentialRead(credential *Credential) (map[string]interface{}) {
+	d := map[string]interface{}{}
 
-	if extra_path == "custom_fields" {
-		for key, value := range credential.CustomUserFields {
-			d[key] = value
-		}
-	} else if extra_path == "attachments" {
-		for _, attachment := range credential.Attachments {
-			d[attachment.FileName] = attachment.FileData
-		}
+	d["Id"] = credential.Id
+	d["Created"] = credential.Created
+	d["Modified"] = credential.Modified
+
+	if(credential.UserName != "") {
+		d["UserName"] = credential.UserName
+	}
+
+	if(credential.Name != "") {
+		d["Name"] = credential.Name
 	} else {
-		d["id"] = credential.Id
-		d["created"] = credential.Created
-		d["modified"] = credential.Modified
-
-		if(credential.UserName != "") {
-			d["user_name"] = credential.UserName
-		}
-
-		if(credential.Name != "") {
-			d["name"] = credential.Name
-		} else if credential.UserName != "" {
-			d["name"] = credential.UserName + "[" + credential.Id + "]"
-		} else {
-			d["name"] = "[" + credential.Id + "]"
-		}
-
-		if(credential.Password != "") {
-			d["password"] = credential.Password
-		}
-
-		if(credential.Notes != "") {
-			d["notes"] = credential.Notes
-		}
-
-		if(credential.Url != "") {
-			d["url"] = credential.Url
-		}
-
-		if(credential.Expires != "") {
-			d["expires"] = credential.Expires
-		}
+		d["Name"] = credential.UserName + "[" + credential.Id + "]"
 	}
 
-	return d
-}
-
-func (b *backend) credentialGroupRead(group *CredentialGroup) (map[string]interface{}) {
-	d := map[string]interface{} {
-		"id": group.Id,
-		"name":   group.Name,
-		"created":   group.Created,
-		"modified":   group.Modified,
+	if(credential.Password != "") {
+		d["Password"] = credential.Password
 	}
 
-	if(group.Expires != "") {
-		d["expires"] = group.Expires
+	if(credential.Notes != "") {
+		d["Notes"] = credential.Notes
 	}
 
-	if(group.Notes != "") {
-		d["notes"] = group.Notes
+	if(credential.Url != "") {
+		d["Url"] = credential.Url
 	}
 
-	custom_user_fields := map[string]string{}
-
-	for key, value := range group.CustomUserFields {
-		custom_user_fields[key] = value
+	if(credential.Expires != "") {
+		d["Expires"] = credential.Expires
 	}
 
-	if(len(custom_user_fields) > 0) {
-		d["custom_fields"] = custom_user_fields
+	for _, attachment := range credential.Attachments {
+		d["Attachment:" + attachment.FileName] = attachment.FileData
 	}
 
 	return d
@@ -164,190 +97,138 @@ func (b *backend) pathKVRead(ctx context.Context, req *logical.Request, data *fr
 
 	pleasant, _ := b.Session(ctx, req.Storage)
 
-	group, credential, extra_path := pleasant.Read(req.Path)
-	var d map[string]interface{}
+	group, credential := pleasant.Read(req.Path)
 
-	if(group == nil || !extra_path_valid(extra_path, true)) {
-		return nil, logical.ErrUnsupportedPath
-	}
+	d := map[string]interface{}{}
 
-	if(credential == nil) {
-		b.Logger().Debug("pathKVRead CredentialGroup: ", group.Name)
-		d = b.credentialGroupRead(group)
-	} else if(group != nil) {
+	if(group != nil && credential != nil) {
 		b.Logger().Debug("pathKVRead Credential: ", credential.Name)
-		d = b.credentialRead(credential, extra_path)
+		d = b.credentialRead(credential)
+		d["Password"] = pleasant.RequestCredentialPassword(credential.Id)
 	}
 
-	resp := &logical.Response{ Data: d }
-	return resp, nil
+	if len(d) > 0 {
+		resp := &logical.Response{ Data: d }
+		return resp, nil
+	}
+
+	return nil, logical.ErrUnsupportedPath
 }
 
-func (b *backend) credentialDelete(credential *Credential, data *framework.FieldData, extra_path string) {
-	extra_path_splitted := strings.SplitN(extra_path, "/", 2)
-	extra, variable := extra_path_splitted[0], extra_path_splitted[1]
-
-	if variable == "" {
-		return
+func (b *backend) credentialUpdate(credential *Credential, data *framework.FieldData) {
+	if(data.Get("Name") != "") {
+		credential.Name = data.Get("Name").(string)
 	}
 
-	if extra == "fields" {
-		if variable == "name" {
-			credential.Name = ""
-		}
+	if(data.Get("UserName") != "") {
+		credential.UserName = data.Get("UserName").(string)
+	}
 
-		if variable == "user_name" {
-			credential.UserName = ""
-		}
+	if(data.Get("Url") != "") {
+		credential.Url = data.Get("Url").(string)
+	}
 
-		if variable == "url" {
-			credential.Url = ""
-		}
+	if(data.Get("Notes") != "") {
+		credential.Notes = data.Get("Notes").(string)
+	}
 
-		if variable == "notes" {
-			credential.Notes = ""
-		}
+	if(data.Get("Password") != "") {
+		credential.Password = data.Get("Password").(string)
+	}
 
-		if variable == "password" {
-			credential.Password = ""
-		}
+	if(data.Get("Expires") != "") {
+		credential.Expires = data.Get("Expires").(string)
+	}
 
-		if variable == "expires" {
-			credential.Expires = ""
-		}
-	} else if extra == "custom_fields" {
-		delete(credential.CustomUserFields, variable)
-	} else if extra == "attachments" {
-		attachments := map[string]string{}
+	custom_fields := credential.CustomUserFields
 
-		for _, attachment := range credential.Attachments {
-			attachments[attachment.FileName] = attachment.FileData
-		}
+	attachments := map[string]string{}
 
-		credential.Attachments = []Attachment{}
+	for _, attachment := range credential.Attachments {
+		attachments[attachment.FileName] = attachment.FileData
+	}
 
-		for file_name, file_data := range attachments {
-			if file_name != variable {
-				attachment := Attachment{CredentialObjectId: credential.Id, FileName: file_name, FileData: file_data}
-				credential.Attachments = append(credential.Attachments, attachment)
+
+	for field, _ := range data.Raw {
+		if strings.HasPrefix(field, "Custom:") {
+			custom_field := strings.TrimPrefix(field, "Custom:")
+			custom_field_value := data.Raw[field].(string)
+
+			if len(custom_field_value) > 0 {
+				custom_fields[custom_field] = custom_field_value
+			} else {
+				delete(custom_fields, custom_field)
+			}
+		} else if strings.HasPrefix(field, "Attachment:") {
+			attachment_field := strings.TrimPrefix(field, "Attachment:")
+			attachment_field_value := data.Raw[field].(string)
+
+			if len(attachment_field_value) > 0 {
+				attachments[attachment_field] = attachment_field_value
+			} else {
+				delete(attachments, attachment_field)
 			}
 		}
 	}
-}
 
-func (b *backend) credentialUpdate(credential *Credential, data *framework.FieldData, extra_path string) {
-	if extra_path == "" {
-		extra_path = "fields"
-	}
+	credential.Attachments = []Attachment{}
 
-	if extra_path == "fields" {
-		if(data.Get("name") != "") {
-			credential.Name = data.Get("name").(string)
-		}
-
-		if(data.Get("user_name") != "") {
-			credential.UserName = data.Get("user_name").(string)
-		}
-
-		if(data.Get("url") != "") {
-			credential.Url = data.Get("url").(string)
-		}
-
-		if(data.Get("notes") != "") {
-			credential.Notes = data.Get("notes").(string)
-		}
-
-		if(data.Get("password") != "") {
-			credential.Password = data.Get("password").(string)
-		}
-
-		if(data.Get("expires") != "") {
-			credential.Expires = data.Get("expires").(string)
-		}
-
-	} else if extra_path == "custom_fields" {
-		custom_fields := credential.CustomUserFields
-
-		for field, _ := range data.Raw {
-			custom_fields[field] = data.Raw[field].(string)
-		}
-	} else if extra_path == "attachments" {
-		attachments := map[string]string{}
-
-		for _, attachment := range credential.Attachments {
-			attachments[attachment.FileName] = attachment.FileData
-		}
-
-		for field, field_value := range data.Raw {
-			attachments[field] = field_value.(string)
-		}
-
-		credential.Attachments = []Attachment{}
-
-		for file_name, file_data := range attachments {
-			attachment := Attachment{CredentialObjectId: credential.Id, FileName: file_name, FileData: file_data}
-			credential.Attachments = append(credential.Attachments, attachment)
-		}
+	for file_name, file_data := range attachments {
+		attachment := Attachment{CredentialObjectId: credential.Id, FileName: file_name, FileData: file_data}
+		credential.Attachments = append(credential.Attachments, attachment)
 	}
 }
 
 func (b *backend) credentialGroupUpdate(group *CredentialGroup, data *framework.FieldData) {
-	if(data.Get("name") != "") {
-		group.Name = data.Get("name").(string)
+	if(data.Get("Name") != "") {
+		group.Name = data.Get("Name").(string)
 	}
 
-	if(data.Get("notes") != "") {
-		group.Notes = data.Get("notes").(string)
+	if(data.Get("Notes") != "") {
+		group.Notes = data.Get("Notes").(string)
 	}
 }
 
 func (b *backend) pathKVCreate(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
-	b.Logger().Debug("pathKVCreate", req.Path)
+	logger := b.Logger()
+	logger.Debug("pathKVCreate path " + req.Path)
+
+	path_splitted := strings.Split(req.Path, "/")
+
+	name := path_splitted[len(path_splitted)-1:][0]
+	path := strings.Join(path_splitted[:len(path_splitted)-1], "/")
 
 	pleasant, _ := b.Session(ctx, req.Storage)
+ 	group, credential := pleasant.Read(path)
 
-	path_splitted := delete_empty(strings.Split(req.Path, "/"))
-	path_splitted = path_splitted[0:len(path_splitted)]
-
-	b.Logger().Debug("New", strings.Join(path_splitted, "/"))
-
-	if !extra_path_valid(path_splitted[len(path_splitted) - 1], false) {
-		group, credential, _ := pleasant.Read(strings.Join(path_splitted[0:len(path_splitted) - 1], "/"))
-
-		if(group != nil && credential == nil) {
-			new_group := &CredentialGroup{ Name: path_splitted[len(path_splitted) - 1], ParentId: group.Id}
-
-			b.credentialGroupUpdate(new_group, data)
-			new_group.Name = path_splitted[len(path_splitted) - 1]
-
-			pleasant.CreateCredentialGroup(new_group)
-
-			new_group, _, _ = pleasant.Read(req.Path)
-
-			return &logical.Response{
-				Data: b.credentialGroupRead(new_group),
-			}, nil
-		}
-
+	if credential != nil {
 		return nil, logical.ErrUnsupportedPath
 	}
 
-	if extra_path_valid(path_splitted[len(path_splitted) - 1], false) && path_splitted[len(path_splitted) - 1] == "fields" {
-		group, credential, _ := pleasant.Read(strings.Join(path_splitted[0:len(path_splitted) - 2], "/"))
+	if group != nil && data.Get("Group") == "true" {
+		new_group := &CredentialGroup{ Name: name, ParentId: group.Id }
+		b.credentialGroupUpdate(new_group, data)
+		new_group.Name = name
 
-		if(group != nil && credential == nil) {
-			new_credential := &Credential{GroupId: group.Id}
+		pleasant.CreateCredentialGroup(new_group)
+		new_group, _ = pleasant.Read(req.Path)
 
-			b.credentialUpdate(new_credential, data, "fields")
-			new_credential.Name = path_splitted[len(path_splitted) - 2]
-			pleasant.CreateCredential(new_credential)
+		return &logical.Response{}, nil
+	} else if group != nil {
+		new_credential := &Credential{ GroupId: group.Id }
+		b.credentialUpdate(new_credential, data)
+		new_credential.Name = name
 
-			_, new_credential, _ = pleasant.Read(req.Path)
+		pleasant.CreateCredential(new_credential)
 
-			return &logical.Response{
-				Data: b.credentialRead(new_credential, "fields"),
-			}, nil
-		}
+		_, new_credential = pleasant.Read(req.Path)
+
+		d := b.credentialRead(new_credential)
+		d["Password"] = pleasant.RequestCredentialPassword(d["Id"].(string))
+
+		return &logical.Response{
+			Data: d,
+		}, nil
 	}
 
 	return nil, logical.ErrUnsupportedPath
@@ -356,25 +237,23 @@ func (b *backend) pathKVCreate(ctx context.Context, req *logical.Request, data *
 func (b *backend) pathKVUpdate(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	b.Logger().Debug("pathKVUpdate", req.Path)
 
+	if len(data.Raw) == 0 {
+		return &logical.Response{}, nil
+	}
+
 	pleasant, _ := b.Session(ctx, req.Storage)
-	group, credential, extra_path := pleasant.Read(req.Path)
+	group, credential := pleasant.Read(req.Path)
 
-	if(credential != nil && extra_path_valid(extra_path, true)) {
-		b.credentialUpdate(credential, data, extra_path)
+	if credential != nil {
+		b.credentialUpdate(credential, data)
 		pleasant.UpdateCredential(credential)
-		_, credential, _ = pleasant.Read(req.Path)
 
-		return &logical.Response{
-			Data: b.credentialRead(credential, extra_path),
-		}, nil
-	} else if(group != nil) {
+		return &logical.Response{}, nil
+	} else if group != nil {
 		b.credentialGroupUpdate(group, data)
 		pleasant.UpdateCredentialGroup(group)
-		group, _, _ = pleasant.Read(req.Path)
 
-		return &logical.Response{
-			Data: b.credentialGroupRead(group),
-		}, nil
+		return &logical.Response{}, nil
 	}
 
 	return nil, logical.ErrUnsupportedPath
@@ -384,20 +263,12 @@ func (b *backend) pathKVDelete(ctx context.Context, req *logical.Request, data *
 	b.Logger().Debug("pathKVDelete", req.Path)
 
 	pleasant, _ := b.Session(ctx, req.Storage)
-	group, credential, extra_path := pleasant.Read(req.Path)
+	group, credential := pleasant.Read(req.Path)
 
-	if(credential != nil && extra_path_valid(extra_path, false)) {
-		if extra_path == "" {
-			pleasant.DeleteCredential(credential)
-		} else {
-			b.credentialDelete(credential, data, extra_path)
-			pleasant.UpdateCredential(credential)
-		}
-
+	if credential != nil {
+		pleasant.DeleteCredential(credential)
 		return &logical.Response{}, nil
-	}
-
-	if(group != nil) {
+	} else if group != nil {
 		pleasant.DeleteCredentialGroup(group)
 		return &logical.Response{}, nil
 	}
@@ -406,45 +277,53 @@ func (b *backend) pathKVDelete(ctx context.Context, req *logical.Request, data *
 }
 
 func (b *backend) pathKVList(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
-	b.Logger().Debug("List", req.Path)
+	b.Logger().Debug("List path " + req.Path)
 
 	pleasant, _ := b.Session(ctx, req.Storage)
 
-	group, credential, extra_path  := pleasant.Read(req.Path)
+	group, credential := pleasant.Read(req.Path)
 
-	if(group == nil || extra_path != "") {
+	if(group == nil || credential != nil) {
 		return nil, logical.ErrUnsupportedPath
 	}
 
 	vals := []string{}
 
-	if credential != nil {
-		vals = append(vals, "fields")
-		vals = append(vals, "custom_fields")
-		vals = append(vals, "attachments")
-	} else {
-		entries := make(map[string][]string)
+	const ( GROUP = 0; SECRET = 1 )
 
-		for _, group := range group.Children {
-			entries[group.Name] = append(entries[group.Name], group.Id)
-		}
-
-		for _, credential := range group.Credentials {
-			updated_credential := b.credentialRead(&credential, "fields")
-			entries[updated_credential["name"].(string)] = append(entries[updated_credential["name"].(string)], updated_credential["id"].(string))
-		}
-
-		for name, list := range entries {
-			if len(list) > 1 {
-				for _, id := range list {
-					vals = append(vals, name + "[" + id + "]/")
-				}
-			} else {
-				vals = append(vals, name + "/")
-			}
-		}
-
+	type Entry struct {
+		Id string
+		Type int
 	}
 
-	return logical.ListResponse(vals), nil
+	entries := make(map[string][]Entry)
+
+	for _, group := range group.Children {
+		name := group.Name
+		entries[name] = append(entries[name], Entry { group.Id, GROUP })
+	}
+
+	for _, credential := range group.Credentials {
+		name := credential.Name
+		entries[name] = append(entries[name], Entry { credential.Id, SECRET })
+	}
+
+	for name, list := range entries {
+		for _, entry := range list {
+			id := name
+
+			if len(list) > 1 || id == "" {
+				id += "[" + entry.Id + "]"
+			}
+
+			if entry.Type == GROUP {
+				id += "/"
+			}
+
+			vals = append(vals, id)
+		}
+	}
+
+	response := logical.ListResponse(vals)
+	return response, nil
 }
