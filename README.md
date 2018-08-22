@@ -7,21 +7,21 @@ Plugin for Hashicorp's Vault, which connect it to Pleasant Password Server.
 Download and build Go plugin sources:
 
 ```
-go get -u https://github.com/bva/vault-pps.git
+go get -u https://github.com/bva/vault-pps-plugin.git
 ```
 You will need to define a plugin directory using the plugin_directory configuration directive in Vault configutration,
 then place the vault-pss executable generated above in the directory.
 
 ```bash
-cp $GOBIN/vault-pps /etc/vault/plugins
-export VAULT_PPS_SHA256_SUM=`shasum -a 256 /etc/vault/plugins/vault-pps | awk '{ print $1; }'`
+cp $GOBIN/vault-pps-plugin /etc/vault/plugins
+export VAULT_PPS_SHA256_SUM=`shasum -a 256 /etc/vault/plugins/vault-pps-plugin | awk '{ print $1; }'`
 ```
 
-Register vault-pps plugin with vault and mount it in Vault _pps_ path:
+Register vault-pps-plugin plugin with vault and mount it in Vault _pps_ path:
 
 ```bash
-vault write sys/plugins/catalog/vault-pps sha_256=$VAULT_PPS_SHA256_SUM command=vault-ppps
-vault secrets enable -path=pps -plugin-name=vault-pps plugin
+vault write sys/plugins/catalog/vault-pps-plugin sha_256=$VAULT_PPS_SHA256_SUM command=vault-pps-plugin
+vault secrets enable -path=pps -plugin-name=vault-pps-plugin plugin
 vault write pps/config/access url="$PPS_URL" user_name="$PPS_USER" password="$PPS_PASSWORD"
 ```
 
@@ -35,7 +35,5 @@ vault write pps/config/access url="$PPS_URL" user_name="$PPS_USER" password="$PP
 Accessing Pleasant Password secrets from Vault:
 
 ```bash
-vault kv get pps/<folder>/<secret>/fields
-vault kv get pps/<folder>/<secret>/custom_fields
-vault kv get pps/<folder>/<secret>/attachments
+vault kv get pps/<folder>/<secret>
 ```
