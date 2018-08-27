@@ -85,6 +85,10 @@ func (b *backend) credentialRead(credential *Credential) (map[string]interface{}
 		d["Expires"] = credential.Expires
 	}
 
+	for name, value := range credential.CustomUserFields {
+		d["Custom:" + name] = value
+	}
+
 	for _, attachment := range credential.Attachments {
 		d["Attachment:" + attachment.FileName] = attachment.FileData
 	}
@@ -140,7 +144,11 @@ func (b *backend) credentialUpdate(credential *Credential, data *framework.Field
 		credential.Expires = data.Get("Expires").(string)
 	}
 
-	custom_fields := credential.CustomUserFields
+	custom_fields := map[string]string{}
+
+	for field_name, field_value := range credential.CustomUserFields {
+		custom_fields[field_name] = field_value
+	}
 
 	attachments := map[string]string{}
 
@@ -149,10 +157,10 @@ func (b *backend) credentialUpdate(credential *Credential, data *framework.Field
 	}
 
 
-	for field, _ := range data.Raw {
+	for field, value := range data.Raw {
 		if strings.HasPrefix(field, "Custom:") {
 			custom_field := strings.TrimPrefix(field, "Custom:")
-			custom_field_value := data.Raw[field].(string)
+			custom_field_value := value.(string)
 
 			if len(custom_field_value) > 0 {
 				custom_fields[custom_field] = custom_field_value
@@ -161,7 +169,7 @@ func (b *backend) credentialUpdate(credential *Credential, data *framework.Field
 			}
 		} else if strings.HasPrefix(field, "Attachment:") {
 			attachment_field := strings.TrimPrefix(field, "Attachment:")
-			attachment_field_value := data.Raw[field].(string)
+			attachment_field_value := value.(string)
 
 			if len(attachment_field_value) > 0 {
 				attachments[attachment_field] = attachment_field_value
@@ -171,6 +179,7 @@ func (b *backend) credentialUpdate(credential *Credential, data *framework.Field
 		}
 	}
 
+	credential.CustomUserFields = custom_fields
 	credential.Attachments = []Attachment{}
 
 	for file_name, file_data := range attachments {
@@ -248,7 +257,11 @@ func (b *backend) pathKVUpdate(ctx context.Context, req *logical.Request, data *
 		b.credentialUpdate(credential, data)
 		pleasant.UpdateCredential(credential)
 
-		return &logical.Response{}, nil
+		d := b.credentialRead(credential)
+
+		return &logical.Response{
+			Data: d,
+		}, nil
 	} else if group != nil {
 		b.credentialGroupUpdate(group, data)
 		pleasant.UpdateCredentialGroup(group)
