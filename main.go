@@ -6,7 +6,7 @@ import (
 	"net/http"
         "crypto/tls"
 //        "pleasant"
-	"github.com/bva/vault-pps/pleasant"
+	"github.com/bva/vault-pps-plugin/pleasant"
 
 	"github.com/hashicorp/vault/helper/pluginutil"
 	"github.com/hashicorp/vault/logical"

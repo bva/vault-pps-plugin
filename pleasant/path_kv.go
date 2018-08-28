@@ -16,7 +16,7 @@ func kvPaths(b *backend) []*framework.Path {
 			Fields: map[string]*framework.FieldSchema{
 				"Id":     &framework.FieldSchema{Type: framework.TypeString},
 				"Name":     &framework.FieldSchema{Type: framework.TypeString},
-				"UserName":     &framework.FieldSchema{Type: framework.TypeString},
+				"Username":     &framework.FieldSchema{Type: framework.TypeString},
 				"Password":  &framework.FieldSchema{Type: framework.TypeString},
 				"Notes":     &framework.FieldSchema{Type: framework.TypeString},
 				"Url":   &framework.FieldSchema{Type: framework.TypeString},
@@ -59,14 +59,14 @@ func (b *backend) credentialRead(credential *Credential) (map[string]interface{}
 	d["Created"] = credential.Created
 	d["Modified"] = credential.Modified
 
-	if(credential.UserName != "") {
-		d["UserName"] = credential.UserName
+	if(credential.Username != "") {
+		d["Username"] = credential.Username
 	}
 
 	if(credential.Name != "") {
 		d["Name"] = credential.Name
 	} else {
-		d["Name"] = credential.UserName + "[" + credential.Id + "]"
+		d["Name"] = credential.Username + "[" + credential.Id + "]"
 	}
 
 	if(credential.Password != "") {
@@ -124,8 +124,8 @@ func (b *backend) credentialUpdate(credential *Credential, data *framework.Field
 		credential.Name = data.Get("Name").(string)
 	}
 
-	if(data.Get("UserName") != "") {
-		credential.UserName = data.Get("UserName").(string)
+	if(data.Get("Username") != "") {
+		credential.Username = data.Get("Username").(string)
 	}
 
 	if(data.Get("Url") != "") {

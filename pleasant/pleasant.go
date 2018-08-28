@@ -38,7 +38,7 @@ type Credential struct {
 	Id string `json:"Id"`
 	Name string `json:"Name"`
 	Password string `json:"Password"`
-	UserName string `json:"UserName,omitempty"`
+	Username string `json:"Username,omitempty"`
 	Url string `json:"Url,omitempty"`
 	Notes string `json:",omitempty"`
 	GroupId string `json:"GroupId"`
@@ -275,7 +275,7 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 		b.Logger().Debug("LastLeaf check credential", credential.Name)
 
 		if  credential.Name+"["+credential.Id+"]" == last_leaf {
-			b.Logger().Debug("LastLeaf is Credential (by UserName and Id)", credential.UserName+"-"+credential.Id)
+			b.Logger().Debug("LastLeaf is Credential (by Username and Id)", credential.Username+"-"+credential.Id)
 
 //			updated_credential := p.RequestCredential(credential.Id)
 			updated_credential := &credential
