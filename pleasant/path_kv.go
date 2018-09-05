@@ -65,8 +65,6 @@ func (b *backend) credentialRead(credential *Credential) (map[string]interface{}
 
 	if(credential.Name != "") {
 		d["Name"] = credential.Name
-	} else {
-		d["Name"] = credential.Username + "[" + credential.Id + "]"
 	}
 
 	if(credential.Password != "") {
@@ -313,11 +311,20 @@ func (b *backend) pathKVList(ctx context.Context, req *logical.Request, data *fr
 
 	for _, group := range group.Children {
 		name := group.Name
+
 		entries[name] = append(entries[name], Entry { group.Id, GROUP })
 	}
 
 	for _, credential := range group.Credentials {
 		name := credential.Name
+		if name == "" {
+			name = credential.Username
+		}
+
+		if name == "" {
+			name = credential.Id
+		}
+
 		entries[name] = append(entries[name], Entry { credential.Id, SECRET })
 	}
 
@@ -325,7 +332,7 @@ func (b *backend) pathKVList(ctx context.Context, req *logical.Request, data *fr
 		for _, entry := range list {
 			id := name
 
-			if len(list) > 1 || id == "" {
+			if len(list) > 1 {
 				id += "[" + entry.Id + "]"
 			}
 
