@@ -252,6 +252,7 @@ func (b *backend) pathKVUpdate(ctx context.Context, req *logical.Request, data *
 	group, credential := pleasant.Read(req.Path)
 
 	if credential != nil {
+		credential.Password = pleasant.RequestCredentialPassword(credential.Id)
 		b.credentialUpdate(credential, data)
 		pleasant.UpdateCredential(credential)
 
