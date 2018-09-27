@@ -176,7 +176,11 @@ func (p *Pleasant) RequestRootCredentialGroup(invalidate bool) *CredentialGroup 
 		return root.(*CredentialGroup)
 	}
 
-	root = p.RequestCredentialGroup("")
+	new_root := p.RequestCredentialGroup("")
+	if new_root != nil {
+		root = new_root
+	}
+
 	p.root.Store(root)
 
 	if !invalidate {
@@ -301,14 +305,22 @@ func (p *Pleasant) RequestCredentialGroup(id string) *CredentialGroup {
 	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetResult(CredentialGroup{})
 	resp, _ := request.Get(strings.Join([]string {"/api/v4/rest/credentialgroup/", id}, "/"))
 
-	return resp.Result().(*CredentialGroup)
+	if resp.StatusCode() == 200 && resp.Result() != nil {
+		return resp.Result().(*CredentialGroup)
+	}
+
+	return nil
 }
 
 func (p *Pleasant) RequestCredential(id string) *Credential {
 	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetResult(Credential{})
 	resp, _ := request.Get(strings.Join([]string {"/api/v4/rest/credential/", id}, "/"))
 
-	return resp.Result().(*Credential)
+	if resp.StatusCode() == 200 && resp.Result() != nil {
+		return resp.Result().(*Credential)
+	}
+
+	return nil
 }
 
 func (p *Pleasant) UpdateCredential(credential *Credential)  {
