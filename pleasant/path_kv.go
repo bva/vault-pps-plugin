@@ -158,21 +158,19 @@ func (b *backend) credentialUpdate(credential *Credential, data *framework.Field
 	for field, value := range data.Raw {
 		if strings.HasPrefix(field, "Custom:") {
 			custom_field := strings.TrimPrefix(field, "Custom:")
-			custom_field_value := value.(string)
 
-			if len(custom_field_value) > 0 {
-				custom_fields[custom_field] = custom_field_value
-			} else {
+			if value == nil || len(value.(string)) == 0 {
 				delete(custom_fields, custom_field)
+			} else {
+				custom_fields[custom_field] = value.(string)
 			}
 		} else if strings.HasPrefix(field, "Attachment:") {
 			attachment_field := strings.TrimPrefix(field, "Attachment:")
-			attachment_field_value := value.(string)
 
-			if len(attachment_field_value) > 0 {
-				attachments[attachment_field] = attachment_field_value
-			} else {
+			if value == nil || len(value.(string)) == 0 {
 				delete(attachments, attachment_field)
+			} else {
+				attachments[attachment_field] = value.(string)
 			}
 		}
 	}

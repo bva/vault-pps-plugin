@@ -7,31 +7,24 @@ import (
 	"github.com/hashicorp/vault/logical/framework"
 )
 
-// New returns a new backend as an interface. This func
-// is only necessary for builtin backend plugins.
-func New() (interface{}, error) {
-	return Backend(), nil
-}
-
-// Factory returns a new backend as logical.Backend.
-func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
-	b := Backend()
-	if err := b.Setup(ctx, conf); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
+var(
+    backend_singleton *backend
+)
 
 // FactoryType is a wrapper func that allows the Factory func to specify
 // the backend type for the mock backend plugin instance.
 func FactoryType(backendType logical.BackendType) logical.Factory {
 	return func(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
-		b := Backend()
-		b.BackendType = backendType
-		if err := b.Setup(ctx, conf); err != nil {
-			return nil, err
+		if backend_singleton == nil {
+			backend_singleton = Backend()
+
+			backend_singleton.BackendType = backendType
+			if err := backend_singleton.Setup(ctx, conf); err != nil {
+				return nil, err
+			}
 		}
-		return b, nil
+
+		return *backend_singleton, nil
 	}
 }
 

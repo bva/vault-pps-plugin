@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 	"fmt"
+	"sync"
 	"sync/atomic"
 )
 
@@ -84,12 +85,16 @@ type Pleasant struct {
 
 	backend logical.Backend
 
+	mutex *sync.Mutex
+
 	reauth_quit chan bool
 	recredential_quit chan bool
 }
 
 func NewPleasant(backend logical.Backend) *Pleasant {
 	p := new(Pleasant)
+
+	p.mutex = &sync.Mutex{}
 
 	p.reauth_quit = make(chan bool)
 	p.recredential_quit = make(chan bool)
@@ -107,20 +112,13 @@ func (p *Pleasant) Login(url, username, password string) *Pleasant {
 		"Accept-Encoding": "gzip",
 	})
 
-	resp, _ := p.resty.R().SetFormData(map[string]string{
-		"grant_type": "password",
-		"username": username,
-		"password": password,
-	}).SetResult(AuthSuccess{}).Post("/OAuth2/Token")
-
-	auth := resp.Result().(*AuthSuccess)
-	p.auth.Store(auth)
+	p.auth.Store(p.RequestAuth(username, password))
 
 	go func() {
 		auth := p.auth.Load().(*AuthSuccess)
 		ticker := time.NewTicker(time.Second)
 
-		duration := time.Duration(auth.ExpiresIn - 30) * time.Second
+		duration := time.Duration(int(auth.ExpiresIn/2)) * time.Second
 
 		for range ticker.C {
 			duration -= time.Second
@@ -133,16 +131,35 @@ func (p *Pleasant) Login(url, username, password string) *Pleasant {
 			default:
 				if duration <= 0 {
 					p.backend.Logger().Debug("Timer cached AuthToken")
-					resp, _ := p.resty.R().SetFormData(map[string]string{
-						"grant_type": "password",
-						"username": username,
-						"password": password,
-					}).SetResult(AuthSuccess{}).Post("/OAuth2/Token")
+					p.auth.Store(p.RequestAuth(username, password))
+					auth = p.auth.Load().(*AuthSuccess)
+					duration = time.Duration(int(auth.ExpiresIn/2)) * time.Second
+				}
+			}
+		}
+	}()
 
-					auth := resp.Result().(*AuthSuccess)
-					p.auth.Store(auth)
+	go func() {
+		p.backend.Logger().Debug("Starting cached RootCredentialGroup goroutine")
 
-					duration = time.Duration(auth.ExpiresIn - 1) * time.Second
+		ticker := time.NewTicker(time.Second)
+		duration := time.Duration(5*60) * time.Second
+
+		for range ticker.C {
+			duration -= time.Second
+
+			select {
+			case <- p.recredential_quit:
+				p.backend.Logger().Debug("Timer cached RootCredentialGroup cancelled")
+				return
+
+			default:
+				if duration <= 0 {
+					p.backend.Logger().Debug("Timer cached RootCredentialGroup")
+					p.mutex.Lock()
+					p.Invalidate()
+					p.mutex.Unlock()
+					duration = time.Duration(5*60) * time.Second
 				}
 			}
 		}
@@ -158,12 +175,32 @@ func (p *Pleasant) Logout() {
 	p.auth.Store(nil)
 }
 
-func (p *Pleasant) Invalidate() {
-	p.RequestRootCredentialGroup(true)
-}
-
 func (p *Pleasant) GetAccessToken() string {
 	return p.auth.Load().(*AuthSuccess).AccessToken
+}
+
+func (p *Pleasant) RequestAuth(username string, password string) *AuthSuccess {
+	p.mutex.Lock()
+
+	resp, _ := p.resty.R().SetFormData(map[string]string{
+		"grant_type": "password",
+		"username": username,
+		"password": password,
+	}).SetResult(AuthSuccess{}).Post("/OAuth2/Token")
+
+	p.mutex.Unlock()
+
+	return resp.Result().(*AuthSuccess)
+}
+
+func (p *Pleasant) Invalidate() *CredentialGroup {
+	new_root := p.RequestCredentialGroup("")
+
+	if new_root != nil {
+		p.root.Store(new_root)
+	}
+
+	return new_root
 }
 
 func (p *Pleasant) RequestRootCredentialGroup(invalidate bool) *CredentialGroup {
@@ -176,38 +213,7 @@ func (p *Pleasant) RequestRootCredentialGroup(invalidate bool) *CredentialGroup 
 		return root.(*CredentialGroup)
 	}
 
-	new_root := p.RequestCredentialGroup("")
-	if new_root != nil {
-		root = new_root
-	}
-
-	p.root.Store(root)
-
-	if !invalidate {
-		go func() {
-			p.backend.Logger().Debug("Starting cached RootCredentialGroup goroutine")
-
-			ticker := time.NewTicker(time.Second)
-			duration := time.Duration(5*60) * time.Second
-
-			for range ticker.C {
-				duration -= time.Second
-
-				select {
-				case <- p.recredential_quit:
-					p.backend.Logger().Debug("Timer cached RootCredentialGroup cancelled")
-					return
-
-				default:
-					if duration <= 0 {
-						p.backend.Logger().Debug("Timer cached RootCredentialGroup")
-						p.root.Store(p.RequestCredentialGroup(""))
-						duration = time.Duration(5*60) * time.Second
-					}
-				}
-			}
-		}()
-	}
+	root = p.Invalidate()
 
 	return root.(*CredentialGroup)
 }
@@ -233,7 +239,9 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 
 	b.Logger().Debug("PathSplitted", fmt.Sprintf("%v", path_splitted))
 
+	p.mutex.Lock()
 	node := p.RequestRootCredentialGroup(false)
+	p.mutex.Unlock()
 
 	if(len(path_splitted) == 0) {
 		return node, nil
@@ -268,10 +276,7 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 
 		if credential.Name == last_leaf || credential.Name+"["+credential.Id+"]" == last_leaf {
 			b.Logger().Debug("LastLeaf is Credential", credential.Name)
-
-//			updated_credential := p.RequestCredential(credential.Id)
-			updated_credential := &credential
-			return node, updated_credential
+			return node, &credential
 		}
 	}
 
@@ -280,10 +285,7 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 
 		if credential.Username == last_leaf || credential.Username+"["+credential.Id+"]" == last_leaf {
 			b.Logger().Debug("LastLeaf is Credential", credential.Name)
-
-//			updated_credential := p.RequestCredential(credential.Id)
-			updated_credential := &credential
-			return node, updated_credential
+			return node, &credential
 		}
 	}
 
@@ -292,7 +294,6 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 
 		if (group.Name == last_leaf || group.Name + "[" + group.Id + "]" == last_leaf) {
 			b.Logger().Debug("LastLeaf is CredentialGroup", group.Name)
-			//			return p.RequestCredentialGroup(group.Id), nil, extra_path
 			return &group, nil
 		}
 	}
@@ -305,63 +306,85 @@ func (p *Pleasant) RequestCredentialGroup(id string) *CredentialGroup {
 	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetResult(CredentialGroup{})
 	resp, _ := request.Get(strings.Join([]string {"/api/v4/rest/credentialgroup/", id}, "/"))
 
+	var result *CredentialGroup = nil
+
 	if resp.StatusCode() == 200 && resp.Result() != nil {
-		return resp.Result().(*CredentialGroup)
+		result = resp.Result().(*CredentialGroup)
 	}
 
-	return nil
+	return result
 }
 
 func (p *Pleasant) RequestCredential(id string) *Credential {
+	p.mutex.Lock()
+
 	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetResult(Credential{})
 	resp, _ := request.Get(strings.Join([]string {"/api/v4/rest/credential/", id}, "/"))
 
+	var result *Credential = nil
+
 	if resp.StatusCode() == 200 && resp.Result() != nil {
-		return resp.Result().(*Credential)
+		result = resp.Result().(*Credential)
 	}
 
-	return nil
+	p.mutex.Unlock()
+
+	return result
 }
 
 func (p *Pleasant) UpdateCredential(credential *Credential)  {
+	p.mutex.Lock()
 	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetBody(credential)
 	request.Put(strings.Join([]string {"/api/v4/rest/credential/", credential.Id}, "/"))
 	p.Invalidate()
+	p.mutex.Unlock()
 }
 
 func (p *Pleasant) UpdateCredentialGroup(group *CredentialGroup)  {
+	p.mutex.Lock()
 	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetBody(group)
 	request.Put(strings.Join([]string {"/api/v4/rest/credentialgroup/", group.Id}, "/"))
 	p.Invalidate()
+	p.mutex.Unlock()
 }
 
 func (p *Pleasant) CreateCredential(credential *Credential)  {
+	p.mutex.Lock()
 	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetBody(credential)
 	request.Post("/api/v4/rest/credential")
 	p.Invalidate()
+	p.mutex.Unlock()
 }
 
 func (p *Pleasant) CreateCredentialGroup(group *CredentialGroup)  {
+	p.mutex.Lock()
 	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetBody(group)
 	request.Post("/api/v4/rest/credentialgroup")
 	p.Invalidate()
+	p.mutex.Unlock()
 }
 
 func (p *Pleasant) DeleteCredential(credential *Credential)  {
+	p.mutex.Lock()
 	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken())
 	request.Delete(strings.Join([]string {"/api/v4/rest/credential/", credential.Id}, "/"))
 	p.Invalidate()
+	p.mutex.Unlock()
 }
 
 func (p *Pleasant) DeleteCredentialGroup(group *CredentialGroup)  {
+	p.mutex.Lock()
 	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken())
 	request.Delete(strings.Join([]string {"/api/v4/rest/credentialgroup/", group.Id}, "/"))
 	p.Invalidate()
+	p.mutex.Unlock()
 }
 
 func (p *Pleasant) RequestCredentialPassword(id string) string {
+	p.mutex.Lock()
 	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken())
 	resp, _ := request.Get(strings.Join([]string {"/api/v4/rest/credential/", id, "password"}, "/"))
+	p.mutex.Unlock()
 
 	if(len(resp.String()) > 0) {
 		return (resp.String())[1 : len(resp.String())-1]

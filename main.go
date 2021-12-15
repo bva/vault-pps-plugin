@@ -5,8 +5,7 @@ import (
 	"os"
 	"net/http"
         "crypto/tls"
-//        "pleasant"
-	"github.com/bva/vault-pps-plugin/pleasant"
+        "./pleasant"
 
 	"github.com/hashicorp/vault/helper/pluginutil"
 	"github.com/hashicorp/vault/logical"
@@ -29,6 +28,7 @@ func main() {
 		BackendFactoryFunc: factoryFunc,
 		TLSProviderFunc:    tlsProviderFunc,
 	})
+
 	if err != nil {
 		log.Println(err)
 		os.Exit(1)
