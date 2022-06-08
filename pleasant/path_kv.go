@@ -3,8 +3,8 @@ package pleasant
 import (
 	"context"
 	"strings"
-	"github.com/hashicorp/vault/logical"
-	"github.com/hashicorp/vault/logical/framework"
+	"github.com/hashicorp/vault/sdk/logical"
+	"github.com/hashicorp/vault/sdk/framework"
 )
 
 // kvPaths is used to test CRUD and List operations. It is a simplified

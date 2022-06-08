@@ -1,8 +1,8 @@
 package pleasant
 
 import (
-	"github.com/hashicorp/vault/logical"
-	"github.com/go-resty/resty"
+	"github.com/hashicorp/vault/sdk/logical"
+	"gopkg.in/resty.v1"
 	"strings"
 	"time"
 	"fmt"
