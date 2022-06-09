@@ -25,7 +25,7 @@ vault secrets enable -path=pps -plugin-name=vault-pps-plugin plugin
 vault write pps/config/access url="$PPS_URL" user_name="$PPS_USER" password="$PPS_PASSWORD"
 ```
 
-| Variable             | Vault                                                                               |
+| Variable             | Description                                                                         |
 | ---------------------|-------------------------------------------------------------------------------------|
 | PPS_URL              | URL for Pleasant Password Server (https://localhost:8001/)                          |
 | PPS_USER             | Username in Pleasant Password Server under which Vault plugin connects              |
