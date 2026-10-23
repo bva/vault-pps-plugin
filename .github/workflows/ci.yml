@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - development
+  pull_request:
+    branches:
+      - master
+      - development
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: true
+
+      - name: Run tests with race detector
+        run: go test -race -v -cover ./...
+
+      - name: Verify GoReleaser snapshot build
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v1"
+          args: release --snapshot --clean
+
