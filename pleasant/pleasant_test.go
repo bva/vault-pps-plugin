@@ -27,6 +27,7 @@ type mockPPSServer struct {
 	expiresIn    uint
 	pwdStatus    int
 	pwdRawBody   string
+	pwdDelay     time.Duration
 
 	authCalls  int32
 	treeCalls  int32
@@ -278,8 +279,13 @@ func (m *mockPPSServer) handleCredential(w http.ResponseWriter, r *http.Request)
 		expectedTok := m.token
 		status := m.pwdStatus
 		rawBody := m.pwdRawBody
+		delay := m.pwdDelay
 		pwd, exists := m.passwords[credID]
 		m.mu.Unlock()
+
+		if delay > 0 {
+			time.Sleep(delay)
+		}
 
 		if status != 0 && status != http.StatusOK {
 			w.Header().Set("Content-Type", "application/json")
@@ -1072,6 +1078,153 @@ func TestPasswordRead404RefreshesParentGroupAndReturnsUnsupportedPath(t *testing
 		t.Errorf("expected ABBPRD_app to be evicted from cached group after 404 refresh, got exists=%v err=%v", exists, err)
 	}
 }
+
+func TestConcurrentPasswordReadsRunInParallel(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	// Prime tree cache first
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders/abb01p",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+
+	mock.mu.Lock()
+	mock.pwdDelay = 50 * time.Millisecond
+	mock.mu.Unlock()
+
+	const workers = 10
+	start := time.Now()
+	errCh := make(chan error, workers)
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			resp, rErr := b.HandleRequest(ctx, &logical.Request{
+				Operation: logical.ReadOperation,
+				Path:      "Shared_Folders/abb01p/ABBPRD_app",
+				Storage:   storage,
+			})
+			if rErr != nil {
+				errCh <- rErr
+				return
+			}
+			if resp == nil || resp.Data["Password"] != "s3cret-abb01p" {
+				errCh <- logical.ErrUnsupportedPath
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for rErr := range errCh {
+		t.Fatalf("concurrent read failed: %v", rErr)
+	}
+
+	elapsed := time.Since(start)
+	// Serialized execution of 10 * 50ms takes >= 500ms; parallel execution should complete well under 250ms.
+	if elapsed >= 250*time.Millisecond {
+		t.Fatalf("expected %d concurrent reads (50ms each) to run in parallel (< 250ms), took %v", workers, elapsed)
+	}
+}
+
+func TestConcurrent401ReauthCoalescesTokenRefresh(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	mock.enforceToken = true
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	// Prime session and tree cache with mock-oauth-token-1
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders/abb01p",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+
+	// Rotate server token so all concurrent in-flight requests hit 401
+	mock.mu.Lock()
+	mock.token = "mock-oauth-token-2"
+	mock.pwdDelay = 20 * time.Millisecond
+	mock.mu.Unlock()
+
+	const workers = 8
+	errCh := make(chan error, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			resp, rErr := b.HandleRequest(ctx, &logical.Request{
+				Operation: logical.ReadOperation,
+				Path:      "Shared_Folders/abb01p/ABBPRD_app",
+				Storage:   storage,
+			})
+			if rErr != nil || resp == nil || resp.Data["Password"] != "s3cret-abb01p" {
+				errCh <- rErr
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for rErr := range errCh {
+		t.Fatalf("concurrent 401 read failed: %v", rErr)
+	}
+
+	if got := atomic.LoadInt32(&mock.authCalls); got != 2 {
+		t.Errorf("expected concurrent 401s to coalesce into 1 re-auth call (total authCalls=2), got %d", got)
+	}
+}
+
+func TestResetSessionAndLogoutDoNotPanicOrBlock(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	// 1. Prime session and tree cache
+	resp, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "Shared_Folders/abb01p/ABBPRD_app",
+		Storage:   storage,
+	})
+	if err != nil || resp == nil {
+		t.Fatalf("initial read failed: %v", err)
+	}
+
+	p, err := b.Session(ctx, storage)
+	if err != nil || p == nil {
+		t.Fatalf("failed getting session: %v", err)
+	}
+
+	// 2. Invalidate config/access (triggers ResetSession -> Logout) and verify it doesn't panic or block
+	start := time.Now()
+	b.invalidate(ctx, "config/access")
+	p.Logout() // second call must be safe/idempotent
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("expected Logout/ResetSession to return immediately (< 100ms), took %v", elapsed)
+	}
+
+	// 3. Subsequent read cleanly creates a new session
+	resp, err = b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "Shared_Folders/abb01p/ABBPRD_app",
+		Storage:   storage,
+	})
+	if err != nil || resp == nil || resp.Data["Password"] != "s3cret-abb01p" {
+		t.Fatalf("read after ResetSession failed: err=%v resp=%#v", err, resp)
+	}
+}
+
 
 
 
