@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/vault/sdk/logical"
 )
@@ -20,6 +21,12 @@ type mockPPSServer struct {
 	root      CredentialGroup
 	passwords map[string]string
 	token     string
+
+	enforceToken bool
+	authStatus   int
+	expiresIn    uint
+	pwdStatus    int
+	pwdRawBody   string
 
 	authCalls  int32
 	treeCalls  int32
@@ -130,21 +137,32 @@ func (m *mockPPSServer) handleOAuthToken(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	m.mu.Lock()
+	authStatus := m.authStatus
+	tok := m.token
+	exp := m.expiresIn
+	m.mu.Unlock()
+	if exp == 0 {
+		exp = 3600
+	}
+
+	if authStatus != 0 && authStatus != http.StatusOK {
+		http.Error(w, `{"error":"server_error"}`, authStatus)
+		return
+	}
+
 	_ = r.ParseForm()
 	if r.FormValue("username") != "pps_admin" || r.FormValue("password") != "pps_pass" {
 		http.Error(w, `{"error":"invalid_grant"}`, http.StatusBadRequest)
 		return
 	}
 
-	m.mu.Lock()
-	tok := m.token
-	m.mu.Unlock()
-
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(AuthSuccess{
 		AccessToken: tok,
 		TokenType:   "bearer",
-		ExpiresIn:   3600,
+		ExpiresIn:   exp,
 	})
 }
 
@@ -252,9 +270,28 @@ func (m *mockPPSServer) handleCredential(w http.ResponseWriter, r *http.Request)
 	if len(parts) == 2 && parts[1] == "password" && r.Method == http.MethodGet {
 		atomic.AddInt32(&m.pwdCalls, 1)
 		credID := parts[0]
+
 		m.mu.Lock()
+		enforce := m.enforceToken
+		expectedTok := m.token
+		status := m.pwdStatus
+		rawBody := m.pwdRawBody
 		pwd := m.passwords[credID]
 		m.mu.Unlock()
+
+		if status != 0 && status != http.StatusOK {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(rawBody))
+			return
+		}
+
+		if enforce && r.Header.Get("Authorization") != expectedTok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"Message":"Authorization has been denied for this request."}`))
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(pwd)
@@ -659,3 +696,169 @@ func TestCredentialAndGroupCRUD(t *testing.T) {
 		t.Errorf("expected ErrUnsupportedPath after deleting credential, got: %v", err)
 	}
 }
+
+func TestPasswordReadReauthenticatesOn401(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	mock.enforceToken = true
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	// 1. Prime session and tree cache with mock-oauth-token-1
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders/abb01p",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+
+	// 2. Rotate server-side valid token so the cached token-1 receives HTTP 401 on /password,
+	// while a fresh /OAuth2/Token login receives mock-oauth-token-2.
+	mock.mu.Lock()
+	mock.token = "mock-oauth-token-2"
+	mock.mu.Unlock()
+
+	resp, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "Shared_Folders/abb01p/ABBPRD_app",
+		Storage:   storage,
+	})
+	if err != nil || resp == nil || resp.IsError() {
+		t.Fatalf("expected read to recover from 401 via re-auth, got err=%v resp=%#v", err, resp)
+	}
+	if got := resp.Data["Password"]; got != "s3cret-abb01p" {
+		t.Fatalf("expected Password=%q after 401 re-auth, got %q", "s3cret-abb01p", got)
+	}
+	if got := atomic.LoadInt32(&mock.authCalls); got != 2 {
+		t.Errorf("expected 2 OAuth token calls (initial + 401 re-auth), got %d", got)
+	}
+}
+
+func TestPasswordReadReturnsErrorOnHTTPError(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	// Prime tree cache, then simulate HTTP 500 from PPS on /password
+	mock.mu.Lock()
+	mock.pwdStatus = http.StatusInternalServerError
+	mock.pwdRawBody = `{"Message":"An error has occurred."}`
+	mock.mu.Unlock()
+
+	resp, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "Shared_Folders/abb01p/ABBPRD_app",
+		Storage:   storage,
+	})
+	if err == nil && (resp == nil || !resp.IsError()) {
+		t.Fatalf("expected error when PPS returns HTTP 500 on /password, got successful response with Password=%q", resp.Data["Password"])
+	}
+}
+
+func TestPasswordReadUnmarshalsEscapedJSONCharacters(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	rawPassword := `p@ss"w\ord`
+	mock.passwords["cred-1"] = rawPassword
+
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	resp, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "Shared_Folders/abb01p/ABBPRD_app",
+		Storage:   storage,
+	})
+	if err != nil || resp == nil {
+		t.Fatalf("unexpected error reading credential: err=%v resp=%#v", err, resp)
+	}
+	if got := resp.Data["Password"]; got != rawPassword {
+		t.Fatalf("expected JSON-unmarshaled Password=%q, got %q", rawPassword, got)
+	}
+}
+
+func TestPasswordReadReturnsErrorWhen401PersistsAfterReauth(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	// Prime tree cache first
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders/abb01p",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+
+	// Simulate per-entry ACL denial in PPS: /password returns 401 even after re-authenticating
+	mock.mu.Lock()
+	mock.pwdStatus = http.StatusUnauthorized
+	mock.pwdRawBody = `{"Message":"Authorization has been denied for this request."}`
+	mock.mu.Unlock()
+
+	resp, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "Shared_Folders/abb01p/ABBPRD_app",
+		Storage:   storage,
+	})
+	if err == nil && (resp == nil || !resp.IsError()) {
+		t.Fatalf("expected error on persistent 401, got Password=%q", resp.Data["Password"])
+	}
+	if got := atomic.LoadInt32(&mock.authCalls); got != 2 {
+		t.Errorf("expected exactly 1 re-auth attempt (total 2 authCalls), got %d", got)
+	}
+}
+
+func TestFailedReauthDoesNotOverwriteValidToken(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	mock.enforceToken = true
+	mock.expiresIn = 2 //ExpiresIn/2 = 1s so background reauth fires after 1 tick
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	// 1. Prime session with valid mock-oauth-token-1
+	p, err := b.Session(ctx, storage)
+	if err != nil || p == nil {
+		t.Fatalf("failed getting initial session: err=%v", err)
+	}
+
+	// 2. Simulate transient /OAuth2/Token outage (HTTP 503) when background timer fires
+	mock.mu.Lock()
+	mock.authStatus = http.StatusServiceUnavailable
+	mock.mu.Unlock()
+
+	time.Sleep(1200 * time.Millisecond)
+
+	// 3. Existing valid token in p.auth must still be preserved so reads succeed
+	resp, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "Shared_Folders/abb01p/ABBPRD_app",
+		Storage:   storage,
+	})
+	if err != nil || resp == nil || resp.Data["Password"] != "s3cret-abb01p" {
+		t.Fatalf("expected read with preserved token to succeed, got err=%v resp=%#v", err, resp)
+	}
+}
+
+func TestSessionReturnsErrorWhenInitialLoginFails(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	mock.mu.Lock()
+	mock.authStatus = http.StatusUnauthorized
+	mock.mu.Unlock()
+
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	resp, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "Shared_Folders/abb01p/ABBPRD_app",
+		Storage:   storage,
+	})
+	if err == nil && (resp == nil || !resp.IsError()) {
+		t.Fatalf("expected error when initial OAuth login fails, got resp=%#v", resp)
+	}
+}
+
+

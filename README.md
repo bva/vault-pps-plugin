@@ -1,6 +1,8 @@
 # Vault plugin for Pleasant Password Server
 
-Plugin for Hashicorp's Vault, which connect it to Pleasant Password Server.
+Plugin for Hashicorp's Vault, which connects it to Pleasant Password Server.
+
+> **Note:** This plugin supports **Pleasant Password Server REST API v4** (`/api/v4/rest/`, Pleasant Password Server `7.0` – `7.9.x`) only.
 
 ## Installation
 

@@ -2,6 +2,7 @@ package pleasant
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/hashicorp/vault/sdk/framework"
@@ -41,7 +42,10 @@ func kvPaths(b *backend) []*framework.Path {
 func (b *backend) pathExistenceCheck(ctx context.Context, req *logical.Request, data *framework.FieldData) (bool, error) {
 	b.Logger().Debug("ExistenceCheck path " + req.Path)
 
-	pleasant, _ := b.Session(ctx, req.Storage)
+	pleasant, err := b.Session(ctx, req.Storage)
+	if err != nil {
+		return false, err
+	}
 	group, credential := pleasant.Read(req.Path)
 
 	if(group == nil && credential == nil) {
@@ -97,7 +101,10 @@ func (b *backend) credentialRead(credential *Credential) (map[string]interface{}
 func (b *backend) pathKVRead(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	b.Logger().Debug("pathKVRead", req.Path)
 
-	pleasant, _ := b.Session(ctx, req.Storage)
+	pleasant, err := b.Session(ctx, req.Storage)
+	if err != nil {
+		return nil, err
+	}
 
 	group, credential := pleasant.Read(req.Path)
 
@@ -105,8 +112,12 @@ func (b *backend) pathKVRead(ctx context.Context, req *logical.Request, data *fr
 
 	if(group != nil && credential != nil) {
 		b.Logger().Debug("pathKVRead Credential: ", credential.Name)
+		password, err := pleasant.RequestCredentialPassword(credential.Id)
+		if err != nil {
+			return nil, err
+		}
 		d = b.credentialRead(credential)
-		d["Password"] = pleasant.RequestCredentialPassword(credential.Id)
+		d["Password"] = password
 	}
 
 	if len(d) > 0 {
@@ -203,7 +214,10 @@ func (b *backend) pathKVCreate(ctx context.Context, req *logical.Request, data *
 	name := path_splitted[len(path_splitted)-1:][0]
 	path := strings.Join(path_splitted[:len(path_splitted)-1], "/")
 
-	pleasant, _ := b.Session(ctx, req.Storage)
+	pleasant, err := b.Session(ctx, req.Storage)
+	if err != nil {
+		return nil, err
+	}
  	group, credential := pleasant.Read(path)
 
 	if credential != nil {
@@ -215,7 +229,9 @@ func (b *backend) pathKVCreate(ctx context.Context, req *logical.Request, data *
 		b.credentialGroupUpdate(new_group, data)
 		new_group.Name = name
 
-		pleasant.CreateCredentialGroup(new_group)
+		if err := pleasant.CreateCredentialGroup(new_group); err != nil {
+			return nil, err
+		}
 		new_group, _ = pleasant.Read(req.Path)
 
 		return &logical.Response{}, nil
@@ -224,12 +240,21 @@ func (b *backend) pathKVCreate(ctx context.Context, req *logical.Request, data *
 		b.credentialUpdate(new_credential, data)
 		new_credential.Name = name
 
-		pleasant.CreateCredential(new_credential)
+		if err := pleasant.CreateCredential(new_credential); err != nil {
+			return nil, err
+		}
 
 		_, new_credential = pleasant.Read(req.Path)
+		if new_credential == nil {
+			return nil, fmt.Errorf("created credential %q not found in Pleasant tree", req.Path)
+		}
 
 		d := b.credentialRead(new_credential)
-		d["Password"] = pleasant.RequestCredentialPassword(d["Id"].(string))
+		password, err := pleasant.RequestCredentialPassword(d["Id"].(string))
+		if err != nil {
+			return nil, err
+		}
+		d["Password"] = password
 
 		return &logical.Response{
 			Data: d,
@@ -246,13 +271,22 @@ func (b *backend) pathKVUpdate(ctx context.Context, req *logical.Request, data *
 		return &logical.Response{}, nil
 	}
 
-	pleasant, _ := b.Session(ctx, req.Storage)
+	pleasant, err := b.Session(ctx, req.Storage)
+	if err != nil {
+		return nil, err
+	}
 	group, credential := pleasant.Read(req.Path)
 
 	if credential != nil {
-		credential.Password = pleasant.RequestCredentialPassword(credential.Id)
+		password, err := pleasant.RequestCredentialPassword(credential.Id)
+		if err != nil {
+			return nil, err
+		}
+		credential.Password = password
 		b.credentialUpdate(credential, data)
-		pleasant.UpdateCredential(credential)
+		if err := pleasant.UpdateCredential(credential); err != nil {
+			return nil, err
+		}
 
 		d := b.credentialRead(credential)
 
@@ -261,7 +295,9 @@ func (b *backend) pathKVUpdate(ctx context.Context, req *logical.Request, data *
 		}, nil
 	} else if group != nil {
 		b.credentialGroupUpdate(group, data)
-		pleasant.UpdateCredentialGroup(group)
+		if err := pleasant.UpdateCredentialGroup(group); err != nil {
+			return nil, err
+		}
 
 		return &logical.Response{}, nil
 	}
@@ -272,14 +308,21 @@ func (b *backend) pathKVUpdate(ctx context.Context, req *logical.Request, data *
 func (b *backend) pathKVDelete(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	b.Logger().Debug("pathKVDelete", req.Path)
 
-	pleasant, _ := b.Session(ctx, req.Storage)
+	pleasant, err := b.Session(ctx, req.Storage)
+	if err != nil {
+		return nil, err
+	}
 	group, credential := pleasant.Read(req.Path)
 
 	if credential != nil {
-		pleasant.DeleteCredential(credential)
+		if err := pleasant.DeleteCredential(credential); err != nil {
+			return nil, err
+		}
 		return &logical.Response{}, nil
 	} else if group != nil {
-		pleasant.DeleteCredentialGroup(group)
+		if err := pleasant.DeleteCredentialGroup(group); err != nil {
+			return nil, err
+		}
 		return &logical.Response{}, nil
 	}
 
@@ -289,7 +332,10 @@ func (b *backend) pathKVDelete(ctx context.Context, req *logical.Request, data *
 func (b *backend) pathKVList(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	b.Logger().Debug("List path " + req.Path)
 
-	pleasant, _ := b.Session(ctx, req.Storage)
+	pleasant, err := b.Session(ctx, req.Storage)
+	if err != nil {
+		return nil, err
+	}
 
 	group, credential := pleasant.Read(req.Path)
 

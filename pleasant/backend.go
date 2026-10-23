@@ -74,10 +74,13 @@ func (b *backend) Session(ctx context.Context, s logical.Storage) (*Pleasant, er
                 return nil, err
         }
 
-	b.pleasant = NewPleasant(b)
-	b.pleasant.Login(accessConfig.Url, accessConfig.UserName, accessConfig.Password)
+	p := NewPleasant(b)
+	if err := p.Login(accessConfig.Url, accessConfig.UserName, accessConfig.Password); err != nil {
+		return nil, err
+	}
+	b.pleasant = p
 
-        return b.pleasant, nil
+	return b.pleasant, nil
 }
 
 // ResetSession forces creation of a new connection next time Session() is called.

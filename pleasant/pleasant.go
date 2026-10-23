@@ -1,13 +1,16 @@
 package pleasant
 
 import (
-	"github.com/hashicorp/vault/sdk/logical"
-	"gopkg.in/resty.v1"
-	"strings"
-	"time"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"github.com/hashicorp/vault/sdk/logical"
+	"gopkg.in/resty.v1"
 )
 
 type AuthSuccess struct {
@@ -80,6 +83,9 @@ type CredentialGroup struct {
 type Pleasant struct {
 	resty *resty.Client
 
+	username string
+	password string
+
 	auth atomic.Value
 	root atomic.Value
 
@@ -105,17 +111,24 @@ func NewPleasant(backend logical.Backend) *Pleasant {
 	return p
 }
 
-func (p *Pleasant) Login(url, username, password string) *Pleasant {
+func (p *Pleasant) Login(url, username, password string) error {
+	p.username = username
+	p.password = password
+
 	p.resty.SetHostURL(url).SetHeaders(map[string]string{
 		"Content-Type": "application/json",
 		"Accept": "application/json",
 		"Accept-Encoding": "gzip",
 	})
 
-	p.auth.Store(p.RequestAuth(username, password))
+	initialAuth, err := p.requestAuth(username, password)
+	if err != nil {
+		return err
+	}
+	p.auth.Store(initialAuth)
 
 	go func() {
-		auth := p.auth.Load().(*AuthSuccess)
+		auth := initialAuth
 		ticker := time.NewTicker(time.Second)
 
 		duration := time.Duration(int(auth.ExpiresIn/2)) * time.Second
@@ -131,9 +144,17 @@ func (p *Pleasant) Login(url, username, password string) *Pleasant {
 			default:
 				if duration <= 0 {
 					p.backend.Logger().Debug("Timer cached AuthToken")
-					p.auth.Store(p.RequestAuth(username, password))
-					auth = p.auth.Load().(*AuthSuccess)
-					duration = time.Duration(int(auth.ExpiresIn/2)) * time.Second
+					if refreshed, err := p.requestAuth(username, password); err == nil {
+						p.auth.Store(refreshed)
+						auth = refreshed
+					} else {
+						p.backend.Logger().Warn("Failed to refresh Pleasant AuthToken, keeping previous token", "error", err)
+					}
+					retrySec := int(auth.ExpiresIn / 2)
+					if retrySec <= 0 {
+						retrySec = 10
+					}
+					duration = time.Duration(retrySec) * time.Second
 				}
 			}
 		}
@@ -165,7 +186,7 @@ func (p *Pleasant) Login(url, username, password string) *Pleasant {
 		}
 	}()
 
-	return p
+	return nil
 }
 
 func (p *Pleasant) Logout() {
@@ -176,21 +197,69 @@ func (p *Pleasant) Logout() {
 }
 
 func (p *Pleasant) GetAccessToken() string {
-	return p.auth.Load().(*AuthSuccess).AccessToken
+	raw := p.auth.Load()
+	if raw == nil {
+		return ""
+	}
+	auth, ok := raw.(*AuthSuccess)
+	if !ok || auth == nil {
+		return ""
+	}
+	return auth.AccessToken
+}
+
+func (p *Pleasant) requestAuth(username string, password string) (*AuthSuccess, error) {
+	p.mutex.Lock()
+	resp, err := p.resty.R().SetFormData(map[string]string{
+		"grant_type": "password",
+		"username":   username,
+		"password":   password,
+	}).SetResult(AuthSuccess{}).Post("/OAuth2/Token")
+	p.mutex.Unlock()
+
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || resp.StatusCode() != http.StatusOK {
+		status := 0
+		body := ""
+		if resp != nil {
+			status = resp.StatusCode()
+			body = resp.String()
+		}
+		return nil, fmt.Errorf("PPS OAuth2 token request failed with status %d: %s", status, body)
+	}
+
+	auth, ok := resp.Result().(*AuthSuccess)
+	if !ok || auth == nil || auth.AccessToken == "" {
+		return nil, fmt.Errorf("PPS OAuth2 token response missing access_token")
+	}
+
+	return auth, nil
 }
 
 func (p *Pleasant) RequestAuth(username string, password string) *AuthSuccess {
-	p.mutex.Lock()
+	auth, err := p.requestAuth(username, password)
+	if err != nil {
+		return &AuthSuccess{}
+	}
+	return auth
+}
 
-	resp, _ := p.resty.R().SetFormData(map[string]string{
-		"grant_type": "password",
-		"username": username,
-		"password": password,
-	}).SetResult(AuthSuccess{}).Post("/OAuth2/Token")
-
-	p.mutex.Unlock()
-
-	return resp.Result().(*AuthSuccess)
+func (p *Pleasant) executeWithAuthRetry(doReq func(token string) (*resty.Response, error)) (*resty.Response, error) {
+	resp, err := doReq(p.GetAccessToken())
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil && resp.StatusCode() == http.StatusUnauthorized {
+		refreshed, authErr := p.requestAuth(p.username, p.password)
+		if authErr != nil {
+			return resp, fmt.Errorf("PPS re-authentication after 401 failed: %w", authErr)
+		}
+		p.auth.Store(refreshed)
+		return doReq(refreshed.AccessToken)
+	}
+	return resp, nil
 }
 
 func (p *Pleasant) Invalidate() *CredentialGroup {
@@ -208,14 +277,14 @@ func (p *Pleasant) RequestRootCredentialGroup(invalidate bool) *CredentialGroup 
 
 	root := p.root.Load()
 
-	if(root != nil && !invalidate) {
-		p.backend.Logger().Debug("Return cached RootCredentialGroup")
-		return root.(*CredentialGroup)
+	if root != nil && !invalidate {
+		if cg, ok := root.(*CredentialGroup); ok && cg != nil {
+			p.backend.Logger().Debug("Return cached RootCredentialGroup")
+			return cg
+		}
 	}
 
-	root = p.Invalidate()
-
-	return root.(*CredentialGroup)
+	return p.Invalidate()
 }
 
 func delete_empty (s []string) []string {
@@ -242,6 +311,10 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 	p.mutex.Lock()
 	node := p.RequestRootCredentialGroup(false)
 	p.mutex.Unlock()
+
+	if node == nil {
+		return nil, nil
+	}
 
 	if(len(path_splitted) == 0) {
 		return node, nil
@@ -303,92 +376,184 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 }
 
 func (p *Pleasant) RequestCredentialGroup(id string) *CredentialGroup {
-	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetResult(CredentialGroup{})
-	resp, _ := request.Get(strings.Join([]string {"/api/v4/rest/credentialgroup/", id}, "/"))
-
-	var result *CredentialGroup = nil
-
-	if resp.StatusCode() == 200 && resp.Result() != nil {
-		result = resp.Result().(*CredentialGroup)
+	resp, err := p.executeWithAuthRetry(func(token string) (*resty.Response, error) {
+		request := p.resty.R().SetHeader("Authorization", token).SetResult(CredentialGroup{})
+		return request.Get(strings.Join([]string{"/api/v4/rest/credentialgroup/", id}, "/"))
+	})
+	if err != nil || resp == nil {
+		return nil
 	}
 
-	return result
+	if resp.StatusCode() == http.StatusOK && resp.Result() != nil {
+		if result, ok := resp.Result().(*CredentialGroup); ok {
+			return result
+		}
+	}
+
+	return nil
 }
 
 func (p *Pleasant) RequestCredential(id string) *Credential {
-	p.mutex.Lock()
+	resp, err := p.executeWithAuthRetry(func(token string) (*resty.Response, error) {
+		p.mutex.Lock()
+		defer p.mutex.Unlock()
 
-	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetResult(Credential{})
-	resp, _ := request.Get(strings.Join([]string {"/api/v4/rest/credential/", id}, "/"))
-
-	var result *Credential = nil
-
-	if resp.StatusCode() == 200 && resp.Result() != nil {
-		result = resp.Result().(*Credential)
+		request := p.resty.R().SetHeader("Authorization", token).SetResult(Credential{})
+		return request.Get(strings.Join([]string{"/api/v4/rest/credential/", id}, "/"))
+	})
+	if err != nil || resp == nil {
+		return nil
 	}
 
-	p.mutex.Unlock()
-
-	return result
-}
-
-func (p *Pleasant) UpdateCredential(credential *Credential)  {
-	p.mutex.Lock()
-	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetBody(credential)
-	request.Put(strings.Join([]string {"/api/v4/rest/credential/", credential.Id}, "/"))
-	p.Invalidate()
-	p.mutex.Unlock()
-}
-
-func (p *Pleasant) UpdateCredentialGroup(group *CredentialGroup)  {
-	p.mutex.Lock()
-	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetBody(group)
-	request.Put(strings.Join([]string {"/api/v4/rest/credentialgroup/", group.Id}, "/"))
-	p.Invalidate()
-	p.mutex.Unlock()
-}
-
-func (p *Pleasant) CreateCredential(credential *Credential)  {
-	p.mutex.Lock()
-	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetBody(credential)
-	request.Post("/api/v4/rest/credential")
-	p.Invalidate()
-	p.mutex.Unlock()
-}
-
-func (p *Pleasant) CreateCredentialGroup(group *CredentialGroup)  {
-	p.mutex.Lock()
-	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken()).SetBody(group)
-	request.Post("/api/v4/rest/credentialgroup")
-	p.Invalidate()
-	p.mutex.Unlock()
-}
-
-func (p *Pleasant) DeleteCredential(credential *Credential)  {
-	p.mutex.Lock()
-	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken())
-	request.Delete(strings.Join([]string {"/api/v4/rest/credential/", credential.Id}, "/"))
-	p.Invalidate()
-	p.mutex.Unlock()
-}
-
-func (p *Pleasant) DeleteCredentialGroup(group *CredentialGroup)  {
-	p.mutex.Lock()
-	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken())
-	request.Delete(strings.Join([]string {"/api/v4/rest/credentialgroup/", group.Id}, "/"))
-	p.Invalidate()
-	p.mutex.Unlock()
-}
-
-func (p *Pleasant) RequestCredentialPassword(id string) string {
-	p.mutex.Lock()
-	request := p.resty.R().SetHeader("Authorization", p.GetAccessToken())
-	resp, _ := request.Get(strings.Join([]string {"/api/v4/rest/credential/", id, "password"}, "/"))
-	p.mutex.Unlock()
-
-	if(len(resp.String()) > 0) {
-		return (resp.String())[1 : len(resp.String())-1]
+	if resp.StatusCode() == http.StatusOK && resp.Result() != nil {
+		if result, ok := resp.Result().(*Credential); ok {
+			return result
+		}
 	}
 
-	return ""
+	return nil
+}
+
+func checkWriteResponse(op string, resp *resty.Response, err error) error {
+	if err != nil {
+		return err
+	}
+	if resp == nil {
+		return fmt.Errorf("PPS %s returned nil response", op)
+	}
+	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
+		return fmt.Errorf("PPS %s failed with status %d: %s", op, resp.StatusCode(), resp.String())
+	}
+	return nil
+}
+
+func (p *Pleasant) UpdateCredential(credential *Credential) error {
+	resp, err := p.executeWithAuthRetry(func(token string) (*resty.Response, error) {
+		p.mutex.Lock()
+		defer p.mutex.Unlock()
+
+		request := p.resty.R().SetHeader("Authorization", token).SetBody(credential)
+		return request.Put(strings.Join([]string{"/api/v4/rest/credential/", credential.Id}, "/"))
+	})
+	if err := checkWriteResponse("UpdateCredential", resp, err); err != nil {
+		return err
+	}
+	p.mutex.Lock()
+	p.Invalidate()
+	p.mutex.Unlock()
+	return nil
+}
+
+func (p *Pleasant) UpdateCredentialGroup(group *CredentialGroup) error {
+	resp, err := p.executeWithAuthRetry(func(token string) (*resty.Response, error) {
+		p.mutex.Lock()
+		defer p.mutex.Unlock()
+
+		request := p.resty.R().SetHeader("Authorization", token).SetBody(group)
+		return request.Put(strings.Join([]string{"/api/v4/rest/credentialgroup/", group.Id}, "/"))
+	})
+	if err := checkWriteResponse("UpdateCredentialGroup", resp, err); err != nil {
+		return err
+	}
+	p.mutex.Lock()
+	p.Invalidate()
+	p.mutex.Unlock()
+	return nil
+}
+
+func (p *Pleasant) CreateCredential(credential *Credential) error {
+	resp, err := p.executeWithAuthRetry(func(token string) (*resty.Response, error) {
+		p.mutex.Lock()
+		defer p.mutex.Unlock()
+
+		request := p.resty.R().SetHeader("Authorization", token).SetBody(credential)
+		return request.Post("/api/v4/rest/credential")
+	})
+	if err := checkWriteResponse("CreateCredential", resp, err); err != nil {
+		return err
+	}
+	p.mutex.Lock()
+	p.Invalidate()
+	p.mutex.Unlock()
+	return nil
+}
+
+func (p *Pleasant) CreateCredentialGroup(group *CredentialGroup) error {
+	resp, err := p.executeWithAuthRetry(func(token string) (*resty.Response, error) {
+		p.mutex.Lock()
+		defer p.mutex.Unlock()
+
+		request := p.resty.R().SetHeader("Authorization", token).SetBody(group)
+		return request.Post("/api/v4/rest/credentialgroup")
+	})
+	if err := checkWriteResponse("CreateCredentialGroup", resp, err); err != nil {
+		return err
+	}
+	p.mutex.Lock()
+	p.Invalidate()
+	p.mutex.Unlock()
+	return nil
+}
+
+func (p *Pleasant) DeleteCredential(credential *Credential) error {
+	resp, err := p.executeWithAuthRetry(func(token string) (*resty.Response, error) {
+		p.mutex.Lock()
+		defer p.mutex.Unlock()
+
+		request := p.resty.R().SetHeader("Authorization", token)
+		return request.Delete(strings.Join([]string{"/api/v4/rest/credential/", credential.Id}, "/"))
+	})
+	if err := checkWriteResponse("DeleteCredential", resp, err); err != nil {
+		return err
+	}
+	p.mutex.Lock()
+	p.Invalidate()
+	p.mutex.Unlock()
+	return nil
+}
+
+func (p *Pleasant) DeleteCredentialGroup(group *CredentialGroup) error {
+	resp, err := p.executeWithAuthRetry(func(token string) (*resty.Response, error) {
+		p.mutex.Lock()
+		defer p.mutex.Unlock()
+
+		request := p.resty.R().SetHeader("Authorization", token)
+		return request.Delete(strings.Join([]string{"/api/v4/rest/credentialgroup/", group.Id}, "/"))
+	})
+	if err := checkWriteResponse("DeleteCredentialGroup", resp, err); err != nil {
+		return err
+	}
+	p.mutex.Lock()
+	p.Invalidate()
+	p.mutex.Unlock()
+	return nil
+}
+
+func (p *Pleasant) RequestCredentialPassword(id string) (string, error) {
+	resp, err := p.executeWithAuthRetry(func(token string) (*resty.Response, error) {
+		p.mutex.Lock()
+		defer p.mutex.Unlock()
+
+		request := p.resty.R().SetHeader("Authorization", token)
+		return request.Get(strings.Join([]string{"/api/v4/rest/credential/", id, "password"}, "/"))
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp == nil || resp.StatusCode() != http.StatusOK {
+		status := 0
+		body := ""
+		if resp != nil {
+			status = resp.StatusCode()
+			body = resp.String()
+		}
+		return "", fmt.Errorf("PPS password request failed with status %d: %s", status, body)
+	}
+
+	var password string
+	if err := json.Unmarshal(resp.Body(), &password); err != nil {
+		return "", fmt.Errorf("failed to decode PPS password response: %w", err)
+	}
+
+	return password, nil
 }
