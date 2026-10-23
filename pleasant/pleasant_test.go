@@ -1225,6 +1225,38 @@ func TestResetSessionAndLogoutDoNotPanicOrBlock(t *testing.T) {
 	}
 }
 
+func TestReadCredentialMetadataOnlySkipsPasswordRequest(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	resp, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "Shared_Folders/abb01p/ABBPRD_app",
+		Storage:   storage,
+		Data: map[string]interface{}{
+			"metadata": "true",
+		},
+	})
+	if err != nil || resp == nil {
+		t.Fatalf("failed reading credential with metadata=true: err=%v resp=%#v", err, resp)
+	}
+	if resp.Data["Id"] != "cred-1" ||
+		resp.Data["Name"] != "ABBPRD_app" ||
+		resp.Data["Username"] != "ABBPRD" ||
+		resp.Data["Url"] != "jdbc:oracle:thin:@abb01p:1521/ABBPRD" ||
+		resp.Data["Custom:Env"] != "prod" {
+		t.Fatalf("unexpected credential metadata: %#v", resp.Data)
+	}
+	if _, hasPassword := resp.Data["Password"]; hasPassword {
+		t.Errorf("expected Password to be omitted when metadata=true, got %q", resp.Data["Password"])
+	}
+	if got := atomic.LoadInt32(&mock.pwdCalls); got != 0 {
+		t.Errorf("expected 0 password HTTP requests when metadata=true, got %d", got)
+	}
+}
+
+
 
 
 

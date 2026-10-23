@@ -26,6 +26,12 @@ func kvPaths(b *backend) []*framework.Path {
 				"Modified":  &framework.FieldSchema{Type: framework.TypeString},
 				"Group":   &framework.FieldSchema{Type: framework.TypeString},
 				"Expires":   &framework.FieldSchema{Type: framework.TypeString},
+				"metadata": &framework.FieldSchema{
+					Type:        framework.TypeBool,
+					Default:     false,
+					Query:       true,
+					Description: "When true, returns credential metadata without fetching the password from PPS",
+				},
 			},
 			ExistenceCheck: b.pathExistenceCheck,
 
@@ -113,16 +119,19 @@ func (b *backend) pathKVRead(ctx context.Context, req *logical.Request, data *fr
 
 	if(group != nil && credential != nil) {
 		b.Logger().Debug("pathKVRead Credential: ", credential.Name)
-		password, err := pleasant.RequestCredentialPassword(credential.Id)
-		if err != nil {
-			if errors.Is(err, ErrCredentialNotFound) {
-				pleasant.RefreshGroup(group.Id)
-				return nil, logical.ErrUnsupportedPath
-			}
-			return nil, err
-		}
 		d = b.credentialRead(credential)
-		d["Password"] = password
+		metaOnly, _ := data.Get("metadata").(bool)
+		if !metaOnly {
+			password, err := pleasant.RequestCredentialPassword(credential.Id)
+			if err != nil {
+				if errors.Is(err, ErrCredentialNotFound) {
+					pleasant.RefreshGroup(group.Id)
+					return nil, logical.ErrUnsupportedPath
+				}
+				return nil, err
+			}
+			d["Password"] = password
+		}
 	}
 
 	if len(d) > 0 {

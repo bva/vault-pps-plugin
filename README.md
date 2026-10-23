@@ -39,3 +39,10 @@ Accessing Pleasant Password secrets from Vault:
 ```bash
 vault kv get pps/<folder>/<secret>
 ```
+
+Reading credential metadata (`Id`, `Name`, `Username`, `Url`, `Notes`, `Custom:*`, `Attachment:*`) without fetching the plaintext password from Pleasant Password Server:
+
+```bash
+vault read pps/<folder>/<secret> metadata=true
+# or via HTTP API: GET /v1/pps/<folder>/<secret>?metadata=true
+```
