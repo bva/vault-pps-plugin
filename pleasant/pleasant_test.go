@@ -30,6 +30,7 @@ type mockPPSServer struct {
 
 	authCalls  int32
 	treeCalls  int32
+	groupCalls int32
 	pwdCalls   int32
 }
 
@@ -168,19 +169,20 @@ func (m *mockPPSServer) handleOAuthToken(w http.ResponseWriter, r *http.Request)
 
 func (m *mockPPSServer) handleCredentialGroup(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/v4/rest/credentialgroup/")
-	id = strings.TrimSuffix(id, "/")
+	id = strings.Trim(id, "/")
 
 	switch r.Method {
 	case http.MethodGet:
-		atomic.AddInt32(&m.treeCalls, 1)
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		if id == "" {
+			atomic.AddInt32(&m.treeCalls, 1)
 			_ = json.NewEncoder(w).Encode(m.root)
 			return
 		}
+		atomic.AddInt32(&m.groupCalls, 1)
 		grp := findGroupByID(&m.root, id)
 		if grp == nil {
 			http.NotFound(w, r)
@@ -276,7 +278,7 @@ func (m *mockPPSServer) handleCredential(w http.ResponseWriter, r *http.Request)
 		expectedTok := m.token
 		status := m.pwdStatus
 		rawBody := m.pwdRawBody
-		pwd := m.passwords[credID]
+		pwd, exists := m.passwords[credID]
 		m.mu.Unlock()
 
 		if status != 0 && status != http.StatusOK {
@@ -290,6 +292,11 @@ func (m *mockPPSServer) handleCredential(w http.ResponseWriter, r *http.Request)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"Message":"Authorization has been denied for this request."}`))
+			return
+		}
+
+		if !exists {
+			http.NotFound(w, r)
 			return
 		}
 
@@ -860,5 +867,211 @@ func TestSessionReturnsErrorWhenInitialLoginFails(t *testing.T) {
 		t.Fatalf("expected error when initial OAuth login fails, got resp=%#v", resp)
 	}
 }
+
+func TestReadReloadsParentGroupOnCacheMiss(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	// 1. Prime initial root tree cache
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders/abb01p",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+	if got := atomic.LoadInt32(&mock.treeCalls); got != 1 {
+		t.Fatalf("expected 1 initial root tree fetch, got %d", got)
+	}
+
+	// 2. Simulate DBA Job 1 creating a new credential directly in PPS inside Shared_Folders/abb01p
+	mock.mu.Lock()
+	grp := findGroupByID(&mock.root, "grp-db1")
+	grp.Credentials = append(grp.Credentials, Credential{
+		Id:       "cred-dba-new",
+		Name:     "DBA_NEW_SECRET",
+		Username: "DBA_USER",
+		GroupId:  "grp-db1",
+	})
+	mock.passwords["cred-dba-new"] = "dba-secret-pass"
+	mock.mu.Unlock()
+
+	// 3. DBA Job 2 immediately reads the newly created secret via Vault.
+	// Should trigger partial refresh of grp-db1 (not full root tree) and return the secret.
+	resp, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "Shared_Folders/abb01p/DBA_NEW_SECRET",
+		Storage:   storage,
+	})
+	if err != nil || resp == nil {
+		t.Fatalf("expected read of newly created secret to succeed via partial group reload, got err=%v resp=%#v", err, resp)
+	}
+	if resp.Data["Password"] != "dba-secret-pass" || resp.Data["Username"] != "DBA_USER" {
+		t.Fatalf("unexpected secret data after partial reload: %#v", resp.Data)
+	}
+	if got := atomic.LoadInt32(&mock.treeCalls); got != 1 {
+		t.Errorf("expected full root treeCalls to remain 1, got %d", got)
+	}
+	if got := atomic.LoadInt32(&mock.groupCalls); got != 1 {
+		t.Errorf("expected 1 partial group fetch (grp-db1), got %d", got)
+	}
+}
+
+func TestCreateInNewlyCreatedExternalFolderReloadsParentGroup(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	// 1. Prime initial root tree cache
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+
+	// 2. Simulate DBA creating a new folder Shared_Folders/abb02p directly in PPS
+	mock.mu.Lock()
+	shared := findGroupByID(&mock.root, "grp-shared")
+	shared.Children = append(shared.Children, CredentialGroup{
+		Id:       "grp-db2",
+		Name:     "abb02p",
+		ParentId: "grp-shared",
+	})
+	mock.mu.Unlock()
+
+	// 3. Immediately create a secret inside Shared_Folders/abb02p via Vault
+	createResp, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.CreateOperation,
+		Path:      "Shared_Folders/abb02p/APP_SCHEMA",
+		Storage:   storage,
+		Data: map[string]interface{}{
+			"Username": "APP_SCHEMA",
+			"Password": "app-password-2",
+		},
+	})
+	if err != nil || createResp == nil {
+		t.Fatalf("expected create inside externally created folder to succeed, got err=%v resp=%#v", err, createResp)
+	}
+	if createResp.Data["Password"] != "app-password-2" {
+		t.Fatalf("unexpected created password: %#v", createResp.Data)
+	}
+	if got := atomic.LoadInt32(&mock.treeCalls); got != 1 {
+		t.Errorf("expected full root treeCalls to remain 1, got %d", got)
+	}
+}
+
+func TestCRUDRefreshesOnlyAffectedGroupInsteadOfFullTree(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	// Prime initial tree cache
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders/abb01p",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+	if got := atomic.LoadInt32(&mock.treeCalls); got != 1 {
+		t.Fatalf("expected 1 initial root tree fetch, got %d", got)
+	}
+
+	// Perform Create, Update, and Delete inside Shared_Folders/abb01p
+	_, err = b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.CreateOperation,
+		Path:      "Shared_Folders/abb01p/TEMP_SECRET",
+		Storage:   storage,
+		Data: map[string]interface{}{
+			"Username": "TEMP_USER",
+			"Password": "temp-pass-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	_, err = b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "Shared_Folders/abb01p/TEMP_SECRET",
+		Storage:   storage,
+		Data: map[string]interface{}{
+			"Notes": "updated note",
+		},
+	})
+	if err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+
+	_, err = b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.DeleteOperation,
+		Path:      "Shared_Folders/abb01p/TEMP_SECRET",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("delete failed: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&mock.treeCalls); got != 1 {
+		t.Errorf("expected CRUD operations to use partial group sync without full root tree reloads (expected treeCalls=1, got %d)", got)
+	}
+	if got := atomic.LoadInt32(&mock.groupCalls); got < 3 {
+		t.Errorf("expected at least 3 partial group sync calls for Create/Update/Delete, got %d", got)
+	}
+}
+
+func TestPasswordRead404RefreshesParentGroupAndReturnsUnsupportedPath(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	// 1. Prime cache while ABBPRD_app (cred-1) exists
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders/abb01p",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+
+	// 2. Simulate DBA deleting cred-1 directly in PPS while it's still in Vault's cached tree
+	mock.mu.Lock()
+	deleteCredentialByID(&mock.root, "cred-1")
+	delete(mock.passwords, "cred-1")
+	mock.mu.Unlock()
+
+	// 3. Reading Shared_Folders/abb01p/ABBPRD_app hits 404 on /password, refreshes grp-db1, and returns ErrUnsupportedPath
+	_, err = b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "Shared_Folders/abb01p/ABBPRD_app",
+		Storage:   storage,
+	})
+	if err != logical.ErrUnsupportedPath {
+		t.Fatalf("expected ErrUnsupportedPath when credential was deleted in PPS (404), got: %v", err)
+	}
+	if got := atomic.LoadInt32(&mock.treeCalls); got != 1 {
+		t.Errorf("expected full root treeCalls to remain 1, got %d", got)
+	}
+	if got := atomic.LoadInt32(&mock.groupCalls); got != 1 {
+		t.Errorf("expected 1 partial group refresh on 404, got %d", got)
+	}
+
+	// 4. Subsequent existence check or list immediately sees ABBPRD_app is gone without another HTTP fetch
+	exists, err := b.pathExistenceCheck(ctx, &logical.Request{
+		Path:    "Shared_Folders/abb01p/ABBPRD_app",
+		Storage: storage,
+	}, nil)
+	if err != nil || exists {
+		t.Errorf("expected ABBPRD_app to be evicted from cached group after 404 refresh, got exists=%v err=%v", exists, err)
+	}
+}
+
 
 

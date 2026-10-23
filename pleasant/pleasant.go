@@ -2,6 +2,7 @@ package pleasant
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"github.com/hashicorp/vault/sdk/logical"
 	"gopkg.in/resty.v1"
 )
+
+var ErrCredentialNotFound = errors.New("PPS credential not found")
 
 type AuthSuccess struct {
 	AccessToken string `json:"access_token"`
@@ -272,6 +275,60 @@ func (p *Pleasant) Invalidate() *CredentialGroup {
 	return new_root
 }
 
+func replaceGroupInTree(node *CredentialGroup, target *CredentialGroup) (*CredentialGroup, bool) {
+	if node == nil || target == nil {
+		return nil, false
+	}
+	if node.Id == target.Id {
+		cloned := *target
+		return &cloned, true
+	}
+	for i := range node.Children {
+		if updatedChild, ok := replaceGroupInTree(&node.Children[i], target); ok {
+			cloned := *node
+			children := make([]CredentialGroup, len(node.Children))
+			copy(children, node.Children)
+			children[i] = *updatedChild
+			cloned.Children = children
+			return &cloned, true
+		}
+	}
+	return node, false
+}
+
+func (p *Pleasant) RefreshCredentialGroup(groupId string) *CredentialGroup {
+	if groupId == "" {
+		return p.Invalidate()
+	}
+
+	raw := p.root.Load()
+	if raw == nil {
+		return p.Invalidate()
+	}
+	curRoot, ok := raw.(*CredentialGroup)
+	if !ok || curRoot == nil || curRoot.Id == groupId {
+		return p.Invalidate()
+	}
+
+	freshGroup := p.RequestCredentialGroup(groupId)
+	if freshGroup == nil {
+		return p.Invalidate()
+	}
+
+	if updatedRoot, replaced := replaceGroupInTree(curRoot, freshGroup); replaced {
+		p.root.Store(updatedRoot)
+		return updatedRoot
+	}
+
+	return p.Invalidate()
+}
+
+func (p *Pleasant) RefreshGroup(groupId string) *CredentialGroup {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+	return p.RefreshCredentialGroup(groupId)
+}
+
 func (p *Pleasant) RequestRootCredentialGroup(invalidate bool) *CredentialGroup {
 	p.backend.Logger().Debug("RequestRootCredentialGroup")
 
@@ -299,43 +356,38 @@ func delete_empty (s []string) []string {
 	return r
 }
 
-func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
+func (p *Pleasant) readFromTree(root *CredentialGroup, path_splitted []string) (*CredentialGroup, *Credential, *CredentialGroup) {
 	b := p.backend
 
-	b.Logger().Debug("Read", path)
-	path_splitted := delete_empty(strings.Split(path, "/"))
+	if root == nil {
+		return nil, nil, nil
+	}
+
+	if len(path_splitted) == 0 {
+		return root, nil, root
+	}
+
+	node := root
 	path_rest := path_splitted
 
-	b.Logger().Debug("PathSplitted", fmt.Sprintf("%v", path_splitted))
-
-	p.mutex.Lock()
-	node := p.RequestRootCredentialGroup(false)
-	p.mutex.Unlock()
-
-	if node == nil {
-		return nil, nil
-	}
-
-	if(len(path_splitted) == 0) {
-		return node, nil
-	}
-
-	for _, name := range path_splitted[:len(path_splitted) - 1] {
+	for _, name := range path_splitted[:len(path_splitted)-1] {
 		b.Logger().Debug("Iterate", name)
 		b.Logger().Debug("PathRest", fmt.Sprintf("%v", path_rest))
 
-		for _, group := range node.Children {
-
-			if(name == group.Name || name == group.Name + "[" + group.Id + "]") {
+		found := false
+		for i := range node.Children {
+			group := &node.Children[i]
+			if name == group.Name || name == group.Name+"["+group.Id+"]" {
 				b.Logger().Debug("Found group", group.Name)
-				node = &group
+				node = group
+				found = true
 				break
 			}
 		}
 
-		if (name != node.Name && name != node.Name + "[" + node.Id + "]") {
+		if !found {
 			b.Logger().Debug("Group not found", name)
-			break
+			return nil, nil, node
 		}
 
 		path_rest = path_rest[1:]
@@ -344,41 +396,78 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 	last_leaf := path_rest[0]
 	b.Logger().Debug("LastLeaf", last_leaf)
 
-	for _, credential := range node.Credentials {
+	for i := range node.Credentials {
+		credential := node.Credentials[i]
 		b.Logger().Debug("LastLeaf check credential", credential.Name)
 
 		if credential.Name == last_leaf || credential.Name+"["+credential.Id+"]" == last_leaf {
 			b.Logger().Debug("LastLeaf is Credential", credential.Name)
-			return node, &credential
+			return node, &credential, node
 		}
 	}
 
-	for _, credential := range node.Credentials {
+	for i := range node.Credentials {
+		credential := node.Credentials[i]
 		b.Logger().Debug("LastLeaf check credential", credential.Name)
 
 		if credential.Username == last_leaf || credential.Username+"["+credential.Id+"]" == last_leaf {
 			b.Logger().Debug("LastLeaf is Credential", credential.Name)
-			return node, &credential
+			return node, &credential, node
 		}
 	}
 
-	for _, group := range node.Children {
+	for i := range node.Children {
+		group := node.Children[i]
 		b.Logger().Debug("LastLeaf check group", group.Name)
 
-		if (group.Name == last_leaf || group.Name + "[" + group.Id + "]" == last_leaf) {
+		if group.Name == last_leaf || group.Name+"["+group.Id+"]" == last_leaf {
 			b.Logger().Debug("LastLeaf is CredentialGroup", group.Name)
-			return &group, nil
+			return &group, nil, &group
 		}
 	}
 
 	b.Logger().Debug("LastLeaf not found", last_leaf)
-	return nil, nil
+	return nil, nil, node
+}
+
+func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
+	b := p.backend
+
+	b.Logger().Debug("Read", path)
+	path_splitted := delete_empty(strings.Split(path, "/"))
+
+	b.Logger().Debug("PathSplitted", fmt.Sprintf("%v", path_splitted))
+
+	p.mutex.Lock()
+	root := p.RequestRootCredentialGroup(false)
+	p.mutex.Unlock()
+
+	if root == nil {
+		return nil, nil
+	}
+
+	group, credential, lastMatchedGroup := p.readFromTree(root, path_splitted)
+	if group != nil || credential != nil {
+		return group, credential
+	}
+
+	refreshId := ""
+	if lastMatchedGroup != nil {
+		refreshId = lastMatchedGroup.Id
+	}
+
+	p.mutex.Lock()
+	refreshedRoot := p.RefreshCredentialGroup(refreshId)
+	p.mutex.Unlock()
+
+	group, credential, _ = p.readFromTree(refreshedRoot, path_splitted)
+	return group, credential
 }
 
 func (p *Pleasant) RequestCredentialGroup(id string) *CredentialGroup {
 	resp, err := p.executeWithAuthRetry(func(token string) (*resty.Response, error) {
 		request := p.resty.R().SetHeader("Authorization", token).SetResult(CredentialGroup{})
-		return request.Get(strings.Join([]string{"/api/v4/rest/credentialgroup/", id}, "/"))
+		return request.Get(strings.Join([]string{"/api/v4/rest/credentialgroup", id}, "/"))
 	})
 	if err != nil || resp == nil {
 		return nil
@@ -436,11 +525,12 @@ func (p *Pleasant) UpdateCredential(credential *Credential) error {
 		return request.Put(strings.Join([]string{"/api/v4/rest/credential/", credential.Id}, "/"))
 	})
 	if err := checkWriteResponse("UpdateCredential", resp, err); err != nil {
+		if resp != nil && resp.StatusCode() == http.StatusNotFound {
+			p.RefreshGroup(credential.GroupId)
+		}
 		return err
 	}
-	p.mutex.Lock()
-	p.Invalidate()
-	p.mutex.Unlock()
+	p.RefreshGroup(credential.GroupId)
 	return nil
 }
 
@@ -453,11 +543,12 @@ func (p *Pleasant) UpdateCredentialGroup(group *CredentialGroup) error {
 		return request.Put(strings.Join([]string{"/api/v4/rest/credentialgroup/", group.Id}, "/"))
 	})
 	if err := checkWriteResponse("UpdateCredentialGroup", resp, err); err != nil {
+		if resp != nil && resp.StatusCode() == http.StatusNotFound {
+			p.RefreshGroup(group.ParentId)
+		}
 		return err
 	}
-	p.mutex.Lock()
-	p.Invalidate()
-	p.mutex.Unlock()
+	p.RefreshGroup(group.Id)
 	return nil
 }
 
@@ -472,9 +563,7 @@ func (p *Pleasant) CreateCredential(credential *Credential) error {
 	if err := checkWriteResponse("CreateCredential", resp, err); err != nil {
 		return err
 	}
-	p.mutex.Lock()
-	p.Invalidate()
-	p.mutex.Unlock()
+	p.RefreshGroup(credential.GroupId)
 	return nil
 }
 
@@ -489,9 +578,7 @@ func (p *Pleasant) CreateCredentialGroup(group *CredentialGroup) error {
 	if err := checkWriteResponse("CreateCredentialGroup", resp, err); err != nil {
 		return err
 	}
-	p.mutex.Lock()
-	p.Invalidate()
-	p.mutex.Unlock()
+	p.RefreshGroup(group.ParentId)
 	return nil
 }
 
@@ -504,11 +591,12 @@ func (p *Pleasant) DeleteCredential(credential *Credential) error {
 		return request.Delete(strings.Join([]string{"/api/v4/rest/credential/", credential.Id}, "/"))
 	})
 	if err := checkWriteResponse("DeleteCredential", resp, err); err != nil {
+		if resp != nil && resp.StatusCode() == http.StatusNotFound {
+			p.RefreshGroup(credential.GroupId)
+		}
 		return err
 	}
-	p.mutex.Lock()
-	p.Invalidate()
-	p.mutex.Unlock()
+	p.RefreshGroup(credential.GroupId)
 	return nil
 }
 
@@ -521,11 +609,12 @@ func (p *Pleasant) DeleteCredentialGroup(group *CredentialGroup) error {
 		return request.Delete(strings.Join([]string{"/api/v4/rest/credentialgroup/", group.Id}, "/"))
 	})
 	if err := checkWriteResponse("DeleteCredentialGroup", resp, err); err != nil {
+		if resp != nil && resp.StatusCode() == http.StatusNotFound {
+			p.RefreshGroup(group.ParentId)
+		}
 		return err
 	}
-	p.mutex.Lock()
-	p.Invalidate()
-	p.mutex.Unlock()
+	p.RefreshGroup(group.ParentId)
 	return nil
 }
 
@@ -539,6 +628,9 @@ func (p *Pleasant) RequestCredentialPassword(id string) (string, error) {
 	})
 	if err != nil {
 		return "", err
+	}
+	if resp != nil && resp.StatusCode() == http.StatusNotFound {
+		return "", fmt.Errorf("%w: %s", ErrCredentialNotFound, id)
 	}
 	if resp == nil || resp.StatusCode() != http.StatusOK {
 		status := 0

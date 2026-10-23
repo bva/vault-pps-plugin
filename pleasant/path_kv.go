@@ -2,6 +2,7 @@ package pleasant
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -114,6 +115,10 @@ func (b *backend) pathKVRead(ctx context.Context, req *logical.Request, data *fr
 		b.Logger().Debug("pathKVRead Credential: ", credential.Name)
 		password, err := pleasant.RequestCredentialPassword(credential.Id)
 		if err != nil {
+			if errors.Is(err, ErrCredentialNotFound) {
+				pleasant.RefreshGroup(group.Id)
+				return nil, logical.ErrUnsupportedPath
+			}
 			return nil, err
 		}
 		d = b.credentialRead(credential)
@@ -280,6 +285,10 @@ func (b *backend) pathKVUpdate(ctx context.Context, req *logical.Request, data *
 	if credential != nil {
 		password, err := pleasant.RequestCredentialPassword(credential.Id)
 		if err != nil {
+			if errors.Is(err, ErrCredentialNotFound) {
+				pleasant.RefreshGroup(group.Id)
+				return nil, logical.ErrUnsupportedPath
+			}
 			return nil, err
 		}
 		credential.Password = password
