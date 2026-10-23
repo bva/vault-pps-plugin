@@ -532,6 +532,24 @@ func (p *Pleasant) RequestCredential(id string) *Credential {
 	return nil
 }
 
+func isEntryOrGroupNotFound(resp *resty.Response) bool {
+	if resp == nil {
+		return false
+	}
+	code := resp.StatusCode()
+	if code == http.StatusNotFound {
+		return true
+	}
+	if code == http.StatusBadRequest {
+		status := strings.ToLower(resp.Status())
+		body := strings.ToLower(strings.TrimSpace(resp.String()))
+		if strings.Contains(status, "cannot find") || strings.Contains(body, "cannot find") || body == "" {
+			return true
+		}
+	}
+	return false
+}
+
 func checkWriteResponse(op string, resp *resty.Response, err error) error {
 	if err != nil {
 		return err
@@ -551,7 +569,7 @@ func (p *Pleasant) UpdateCredential(credential *Credential) error {
 		return request.Put(strings.Join([]string{"/api/v4/rest/credential/", credential.Id}, "/"))
 	})
 	if err := checkWriteResponse("UpdateCredential", resp, err); err != nil {
-		if resp != nil && resp.StatusCode() == http.StatusNotFound {
+		if isEntryOrGroupNotFound(resp) {
 			p.RefreshGroup(credential.GroupId)
 		}
 		return err
@@ -566,7 +584,7 @@ func (p *Pleasant) UpdateCredentialGroup(group *CredentialGroup) error {
 		return request.Put(strings.Join([]string{"/api/v4/rest/credentialgroup/", group.Id}, "/"))
 	})
 	if err := checkWriteResponse("UpdateCredentialGroup", resp, err); err != nil {
-		if resp != nil && resp.StatusCode() == http.StatusNotFound {
+		if isEntryOrGroupNotFound(resp) {
 			p.RefreshGroup(group.ParentId)
 		}
 		return err
@@ -605,7 +623,7 @@ func (p *Pleasant) DeleteCredential(credential *Credential) error {
 		return request.Delete(strings.Join([]string{"/api/v4/rest/credential/", credential.Id}, "/"))
 	})
 	if err := checkWriteResponse("DeleteCredential", resp, err); err != nil {
-		if resp != nil && resp.StatusCode() == http.StatusNotFound {
+		if isEntryOrGroupNotFound(resp) {
 			p.RefreshGroup(credential.GroupId)
 		}
 		return err
@@ -620,7 +638,7 @@ func (p *Pleasant) DeleteCredentialGroup(group *CredentialGroup) error {
 		return request.Delete(strings.Join([]string{"/api/v4/rest/credentialgroup/", group.Id}, "/"))
 	})
 	if err := checkWriteResponse("DeleteCredentialGroup", resp, err); err != nil {
-		if resp != nil && resp.StatusCode() == http.StatusNotFound {
+		if isEntryOrGroupNotFound(resp) {
 			p.RefreshGroup(group.ParentId)
 		}
 		return err
@@ -637,7 +655,7 @@ func (p *Pleasant) RequestCredentialPassword(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if resp != nil && resp.StatusCode() == http.StatusNotFound {
+	if isEntryOrGroupNotFound(resp) {
 		return "", fmt.Errorf("%w: %s", ErrCredentialNotFound, id)
 	}
 	if resp == nil || resp.StatusCode() != http.StatusOK {

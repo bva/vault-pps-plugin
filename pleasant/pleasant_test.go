@@ -302,7 +302,8 @@ func (m *mockPPSServer) handleCredential(w http.ResponseWriter, r *http.Request)
 		}
 
 		if !exists {
-			http.NotFound(w, r)
+			// Real PPS 7.8.2.0 returns HTTP 400 ("400 Cannot find the requested entry.") with empty body for missing entries
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
