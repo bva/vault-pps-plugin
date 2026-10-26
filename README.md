@@ -33,7 +33,6 @@ vault write pps/config/access url="$PPS_URL" user_name="$PPS_USER" password="$PP
 | `user_name`          | —       | Username in Pleasant Password Server under which Vault plugin connects                      |
 | `password`           | —       | Password for username in Pleasant Password Server under which Vault plugin connects         |
 | `tree_ttl`           | `300s`  | Full credential tree refresh interval in seconds or Go duration (e.g. `300`, `5m`, `10m`)   |
-| `miss_cooldown`      | `30s`   | Cooldown between partial group refreshes on cache miss in seconds or Go duration (`30s`)    |
 
 
 Accessing Pleasant Password secrets from Vault:

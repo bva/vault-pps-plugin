@@ -97,17 +97,15 @@ type Pleasant struct {
 	authMu sync.Mutex
 	treeMu sync.Mutex
 
-	treeTTL         time.Duration
-	missCooldown    time.Duration
-	lastMissRefresh map[string]time.Time
+	treeTTL time.Duration
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
 }
 
 const (
-	defaultTreeTTL      = defaultTreeTTLSeconds * time.Second
-	defaultMissCooldown = defaultMissCooldownSeconds * time.Second
+	defaultTreeTTL     = defaultTreeTTLSeconds * time.Second
+	defaultHTTPTimeout = 30 * time.Second
 )
 
 func NewPleasant(backend logical.Backend) *Pleasant {
@@ -115,11 +113,9 @@ func NewPleasant(backend logical.Backend) *Pleasant {
 
 	p.stopCh = make(chan struct{})
 	p.treeTTL = defaultTreeTTL
-	p.missCooldown = defaultMissCooldown
-	p.lastMissRefresh = make(map[string]time.Time)
 
 	p.backend = backend
-	p.resty = resty.New()
+	p.resty = resty.New().SetTimeout(defaultHTTPTimeout)
 
 	return p
 }
@@ -298,7 +294,6 @@ func (p *Pleasant) Invalidate() *CredentialGroup {
 
 	if new_root != nil {
 		p.root.Store(new_root)
-		p.lastMissRefresh = make(map[string]time.Time)
 	}
 
 	return new_root
@@ -341,7 +336,7 @@ func (p *Pleasant) RefreshCredentialGroup(groupId string) *CredentialGroup {
 
 	freshGroup := p.RequestCredentialGroup(groupId)
 	if freshGroup == nil {
-		return p.Invalidate()
+		return curRoot
 	}
 
 	if updatedRoot, replaced := replaceGroupInTree(curRoot, freshGroup); replaced {
@@ -349,7 +344,7 @@ func (p *Pleasant) RefreshCredentialGroup(groupId string) *CredentialGroup {
 		return updatedRoot
 	}
 
-	return p.Invalidate()
+	return curRoot
 }
 
 func (p *Pleasant) getCachedRoot() *CredentialGroup {
@@ -483,32 +478,7 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 		return nil, nil
 	}
 
-	group, credential, lastMatchedGroup := p.readFromTree(root, path_splitted)
-	if group != nil || credential != nil {
-		return group, credential
-	}
-
-	refreshId := ""
-	if lastMatchedGroup != nil {
-		refreshId = lastMatchedGroup.Id
-	}
-
-	p.treeMu.Lock()
-	if currentRoot := p.getCachedRoot(); currentRoot != nil && currentRoot != root {
-		if g, c, _ := p.readFromTree(currentRoot, path_splitted); g != nil || c != nil {
-			p.treeMu.Unlock()
-			return g, c
-		}
-	}
-	if p.missCooldown > 0 && time.Since(p.lastMissRefresh[refreshId]) < p.missCooldown {
-		p.treeMu.Unlock()
-		return nil, nil
-	}
-	refreshedRoot := p.RefreshCredentialGroup(refreshId)
-	p.lastMissRefresh[refreshId] = time.Now()
-	p.treeMu.Unlock()
-
-	group, credential, _ = p.readFromTree(refreshedRoot, path_splitted)
+	group, credential, _ := p.readFromTree(root, path_splitted)
 	return group, credential
 }
 
