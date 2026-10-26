@@ -478,6 +478,7 @@ func TestConfigAccessLifecycle(t *testing.T) {
 		resp.Data["password"] != "pps_secret" ||
 		resp.Data["tree_ttl"] != 300 ||
 		resp.Data["miss_cooldown"] != 30 ||
+		resp.Data["http_timeout"] != 30 ||
 		resp.Data["experimental_invalidate_on_miss"] != false {
 		t.Fatalf("unexpected config/access data: %#v", resp.Data)
 	}
@@ -490,6 +491,7 @@ func TestConfigAccessLifecycle(t *testing.T) {
 		Data: map[string]interface{}{
 			"tree_ttl":                        "10m",
 			"miss_cooldown":                   "45s",
+			"http_timeout":                    "90s",
 			"experimental_invalidate_on_miss": true,
 		},
 	}
@@ -506,6 +508,7 @@ func TestConfigAccessLifecycle(t *testing.T) {
 		resp.Data["password"] != "pps_secret" ||
 		resp.Data["tree_ttl"] != 600 ||
 		resp.Data["miss_cooldown"] != 45 ||
+		resp.Data["http_timeout"] != 90 ||
 		resp.Data["experimental_invalidate_on_miss"] != true {
 		t.Fatalf("unexpected config/access data after partial update: %#v", resp.Data)
 	}

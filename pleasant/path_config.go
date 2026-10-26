@@ -12,6 +12,7 @@ import (
 const (
 	defaultTreeTTLSeconds      = 300
 	defaultMissCooldownSeconds = 30
+	defaultHTTPTimeoutSeconds  = 30
 )
 
 func pathConfigAccess(b *backend) []*framework.Path {
@@ -44,6 +45,12 @@ func pathConfigAccess(b *backend) []*framework.Path {
 					Type:        framework.TypeDurationSecond,
 					Default:     defaultMissCooldownSeconds,
 					Description: "Cooldown between partial group refreshes on cache miss in seconds or Go duration (default: 30s)",
+				},
+
+				"http_timeout": &framework.FieldSchema{
+					Type:        framework.TypeDurationSecond,
+					Default:     defaultHTTPTimeoutSeconds,
+					Description: "HTTP client timeout for Pleasant Password Server requests in seconds or Go duration (default: 30s)",
 				},
 
 				"experimental_invalidate_on_miss": &framework.FieldSchema{
@@ -80,6 +87,9 @@ func (b *backend) readConfigAccess(ctx context.Context, storage logical.Storage)
 	if conf.MissCooldown <= 0 {
 		conf.MissCooldown = defaultMissCooldownSeconds
 	}
+	if conf.HTTPTimeout <= 0 {
+		conf.HTTPTimeout = defaultHTTPTimeoutSeconds
+	}
 
 	return conf, nil
 }
@@ -102,6 +112,7 @@ func (b *backend) pathConfigAccessRead(ctx context.Context, req *logical.Request
 			"password":                        conf.Password,
 			"tree_ttl":                        conf.TreeTTL,
 			"miss_cooldown":                   conf.MissCooldown,
+			"http_timeout":                    conf.HTTPTimeout,
 			"experimental_invalidate_on_miss": conf.ExperimentalInvalidateOnMiss,
 		},
 	}, nil
@@ -115,6 +126,7 @@ func (b *backend) pathConfigAccessWrite(ctx context.Context, req *logical.Reques
 		conf = &accessConfig{
 			TreeTTL:      defaultTreeTTLSeconds,
 			MissCooldown: defaultMissCooldownSeconds,
+			HTTPTimeout:  defaultHTTPTimeoutSeconds,
 		}
 	}
 
@@ -132,6 +144,9 @@ func (b *backend) pathConfigAccessWrite(ctx context.Context, req *logical.Reques
 	}
 	if v, ok := data.GetOk("miss_cooldown"); ok && v.(int) > 0 {
 		conf.MissCooldown = v.(int)
+	}
+	if v, ok := data.GetOk("http_timeout"); ok && v.(int) > 0 {
+		conf.HTTPTimeout = v.(int)
 	}
 	if v, ok := data.GetOk("experimental_invalidate_on_miss"); ok {
 		conf.ExperimentalInvalidateOnMiss = v.(bool)
@@ -157,5 +172,6 @@ type accessConfig struct {
 	Password                     string `json:"password"`
 	TreeTTL                      int    `json:"tree_ttl,omitempty"`
 	MissCooldown                 int    `json:"miss_cooldown,omitempty"`
+	HTTPTimeout                  int    `json:"http_timeout,omitempty"`
 	ExperimentalInvalidateOnMiss bool   `json:"experimental_invalidate_on_miss,omitempty"`
 }

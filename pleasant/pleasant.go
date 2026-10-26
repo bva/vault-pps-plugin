@@ -99,6 +99,7 @@ type Pleasant struct {
 
 	treeTTL          time.Duration
 	missCooldown     time.Duration
+	httpTimeout      time.Duration
 	invalidateOnMiss bool
 	lastMissRefresh  map[string]time.Time
 
@@ -109,7 +110,7 @@ type Pleasant struct {
 const (
 	defaultTreeTTL      = defaultTreeTTLSeconds * time.Second
 	defaultMissCooldown = defaultMissCooldownSeconds * time.Second
-	defaultHTTPTimeout  = 30 * time.Second
+	defaultHTTPTimeout  = defaultHTTPTimeoutSeconds * time.Second
 )
 
 func NewPleasant(backend logical.Backend) *Pleasant {
@@ -118,10 +119,11 @@ func NewPleasant(backend logical.Backend) *Pleasant {
 	p.stopCh = make(chan struct{})
 	p.treeTTL = defaultTreeTTL
 	p.missCooldown = defaultMissCooldown
+	p.httpTimeout = defaultHTTPTimeout
 	p.lastMissRefresh = make(map[string]time.Time)
 
 	p.backend = backend
-	p.resty = resty.New().SetTimeout(defaultHTTPTimeout)
+	p.resty = resty.New().SetTimeout(p.httpTimeout)
 
 	return p
 }
@@ -130,6 +132,9 @@ func (p *Pleasant) Login(url, username, password string) error {
 	p.username = username
 	p.password = password
 
+	if p.httpTimeout > 0 {
+		p.resty.SetTimeout(p.httpTimeout)
+	}
 	p.resty.SetHostURL(url).SetHeaders(map[string]string{
 		"Content-Type":    "application/json",
 		"Accept":          "application/json",

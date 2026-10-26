@@ -78,6 +78,7 @@ func (b *backend) Session(ctx context.Context, s logical.Storage) (*Pleasant, er
 	p := NewPleasant(b)
 	p.treeTTL = time.Duration(accessConfig.TreeTTL) * time.Second
 	p.missCooldown = time.Duration(accessConfig.MissCooldown) * time.Second
+	p.httpTimeout = time.Duration(accessConfig.HTTPTimeout) * time.Second
 	p.invalidateOnMiss = accessConfig.ExperimentalInvalidateOnMiss
 	if err := p.Login(accessConfig.Url, accessConfig.UserName, accessConfig.Password); err != nil {
 		return nil, err
