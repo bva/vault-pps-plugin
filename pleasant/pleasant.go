@@ -97,14 +97,26 @@ type Pleasant struct {
 	authMu sync.Mutex
 	treeMu sync.Mutex
 
+	treeTTL         time.Duration
+	missCooldown    time.Duration
+	lastMissRefresh map[string]time.Time
+
 	stopCh   chan struct{}
 	stopOnce sync.Once
 }
+
+const (
+	defaultTreeTTL      = defaultTreeTTLSeconds * time.Second
+	defaultMissCooldown = defaultMissCooldownSeconds * time.Second
+)
 
 func NewPleasant(backend logical.Backend) *Pleasant {
 	p := new(Pleasant)
 
 	p.stopCh = make(chan struct{})
+	p.treeTTL = defaultTreeTTL
+	p.missCooldown = defaultMissCooldown
+	p.lastMissRefresh = make(map[string]time.Time)
 
 	p.backend = backend
 	p.resty = resty.New()
@@ -162,7 +174,11 @@ func (p *Pleasant) Login(url, username, password string) error {
 	go func() {
 		p.backend.Logger().Debug("Starting cached RootCredentialGroup goroutine")
 
-		ticker := time.NewTicker(5 * time.Minute)
+		treeTTL := p.treeTTL
+		if treeTTL <= 0 {
+			treeTTL = defaultTreeTTL
+		}
+		ticker := time.NewTicker(treeTTL)
 		defer ticker.Stop()
 
 		for {
@@ -282,6 +298,7 @@ func (p *Pleasant) Invalidate() *CredentialGroup {
 
 	if new_root != nil {
 		p.root.Store(new_root)
+		p.lastMissRefresh = make(map[string]time.Time)
 	}
 
 	return new_root
@@ -401,7 +418,6 @@ func (p *Pleasant) readFromTree(root *CredentialGroup, path_splitted []string) (
 
 	for _, name := range path_splitted[:len(path_splitted)-1] {
 		b.Logger().Debug("Iterate", name)
-		b.Logger().Debug("PathRest", fmt.Sprintf("%v", path_rest))
 
 		found := false
 		for i := range node.Children {
@@ -426,32 +442,29 @@ func (p *Pleasant) readFromTree(root *CredentialGroup, path_splitted []string) (
 	b.Logger().Debug("LastLeaf", last_leaf)
 
 	for i := range node.Credentials {
-		credential := node.Credentials[i]
-		b.Logger().Debug("LastLeaf check credential", credential.Name)
-
+		credential := &node.Credentials[i]
 		if credential.Name == last_leaf || credential.Name+"["+credential.Id+"]" == last_leaf {
 			b.Logger().Debug("LastLeaf is Credential", credential.Name)
-			return node, &credential, node
+			matched := *credential
+			return node, &matched, node
 		}
 	}
 
 	for i := range node.Credentials {
-		credential := node.Credentials[i]
-		b.Logger().Debug("LastLeaf check credential", credential.Name)
-
+		credential := &node.Credentials[i]
 		if credential.Username == last_leaf || credential.Username+"["+credential.Id+"]" == last_leaf {
 			b.Logger().Debug("LastLeaf is Credential", credential.Name)
-			return node, &credential, node
+			matched := *credential
+			return node, &matched, node
 		}
 	}
 
 	for i := range node.Children {
-		group := node.Children[i]
-		b.Logger().Debug("LastLeaf check group", group.Name)
-
+		group := &node.Children[i]
 		if group.Name == last_leaf || group.Name+"["+group.Id+"]" == last_leaf {
 			b.Logger().Debug("LastLeaf is CredentialGroup", group.Name)
-			return &group, nil, &group
+			matched := *group
+			return &matched, nil, &matched
 		}
 	}
 
@@ -464,8 +477,6 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 
 	b.Logger().Debug("Read", path)
 	path_splitted := delete_empty(strings.Split(path, "/"))
-
-	b.Logger().Debug("PathSplitted", fmt.Sprintf("%v", path_splitted))
 
 	root := p.RequestRootCredentialGroup(false)
 	if root == nil {
@@ -489,7 +500,12 @@ func (p *Pleasant) Read(path string) (*CredentialGroup, *Credential) {
 			return g, c
 		}
 	}
+	if p.missCooldown > 0 && time.Since(p.lastMissRefresh[refreshId]) < p.missCooldown {
+		p.treeMu.Unlock()
+		return nil, nil
+	}
 	refreshedRoot := p.RefreshCredentialGroup(refreshId)
+	p.lastMissRefresh[refreshId] = time.Now()
 	p.treeMu.Unlock()
 
 	group, credential, _ = p.readFromTree(refreshedRoot, path_splitted)

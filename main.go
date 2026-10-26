@@ -13,6 +13,7 @@ import (
 )
 
 func main() {
+	os.Unsetenv("VAULT_PLUGIN_MLOCK_ENABLED")
         http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
 	apiClientMeta := &api.PluginAPIClientMeta{}

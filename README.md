@@ -27,11 +27,13 @@ vault secrets enable -path=pps -plugin-name=vault-pps-plugin plugin
 vault write pps/config/access url="$PPS_URL" user_name="$PPS_USER" password="$PPS_PASSWORD"
 ```
 
-| Variable             | Description                                                                         |
-| ---------------------|-------------------------------------------------------------------------------------|
-| PPS_URL              | URL for Pleasant Password Server (https://localhost:8001/)                          |
-| PPS_USER             | Username in Pleasant Password Server under which Vault plugin connects              |
-| PPS_PASSWORD         | Password for username in Pleasant Password Server under which Vault plugin connects |
+| Parameter            | Default | Description                                                                                 |
+| ---------------------|---------|---------------------------------------------------------------------------------------------|
+| `url`                | —       | URL for Pleasant Password Server (e.g. `https://localhost:8001/`)                           |
+| `user_name`          | —       | Username in Pleasant Password Server under which Vault plugin connects                      |
+| `password`           | —       | Password for username in Pleasant Password Server under which Vault plugin connects         |
+| `tree_ttl`           | `300s`  | Full credential tree refresh interval in seconds or Go duration (e.g. `300`, `5m`, `10m`)   |
+| `miss_cooldown`      | `30s`   | Cooldown between partial group refreshes on cache miss in seconds or Go duration (`30s`)    |
 
 
 Accessing Pleasant Password secrets from Vault:

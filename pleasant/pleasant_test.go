@@ -3,6 +3,7 @@ package pleasant
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -474,8 +475,36 @@ func TestConfigAccessLifecycle(t *testing.T) {
 	}
 	if resp.Data["url"] != "https://pps.example.com" ||
 		resp.Data["user_name"] != "pps_user" ||
-		resp.Data["password"] != "pps_secret" {
+		resp.Data["password"] != "pps_secret" ||
+		resp.Data["tree_ttl"] != 300 ||
+		resp.Data["miss_cooldown"] != 30 {
 		t.Fatalf("unexpected config/access data: %#v", resp.Data)
+	}
+
+	// 3. Partial update of timing parameters preserves existing credentials
+	updateTimingsReq := &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "config/access",
+		Storage:   storage,
+		Data: map[string]interface{}{
+			"tree_ttl":      "10m",
+			"miss_cooldown": "45s",
+		},
+	}
+	if _, err := b.HandleRequest(ctx, updateTimingsReq); err != nil {
+		t.Fatalf("failed updating timing parameters in config/access: %v", err)
+	}
+
+	resp, err = b.HandleRequest(ctx, readReq)
+	if err != nil || resp == nil || resp.IsError() {
+		t.Fatalf("failed reading updated config/access: err=%v resp=%#v", err, resp)
+	}
+	if resp.Data["url"] != "https://pps.example.com" ||
+		resp.Data["user_name"] != "pps_user" ||
+		resp.Data["password"] != "pps_secret" ||
+		resp.Data["tree_ttl"] != 600 ||
+		resp.Data["miss_cooldown"] != 45 {
+		t.Fatalf("unexpected config/access data after partial update: %#v", resp.Data)
 	}
 }
 
@@ -1257,7 +1286,39 @@ func TestReadCredentialMetadataOnlySkipsPasswordRequest(t *testing.T) {
 	}
 }
 
+func TestRepeatedCacheMissesWithinCooldownDoNotStormPPS(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
 
+	// Prime initial tree cache
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+	if got := atomic.LoadInt32(&mock.groupCalls); got != 0 {
+		t.Fatalf("expected 0 partial group calls initially, got %d", got)
+	}
 
+	// Simulate 50 rapid misses under Shared_Folders (e.g. non-existent DB folders)
+	for i := 0; i < 50; i++ {
+		_, err := b.HandleRequest(ctx, &logical.Request{
+			Operation: logical.ListOperation,
+			Path:      fmt.Sprintf("Shared_Folders/missing_db_%d", i),
+			Storage:   storage,
+		})
+		if err != logical.ErrUnsupportedPath {
+			t.Fatalf("expected ErrUnsupportedPath on missing folder, got %v", err)
+		}
+	}
 
+	// Only the first miss should trigger a partial group refresh of Shared_Folders
+	if got := atomic.LoadInt32(&mock.groupCalls); got != 1 {
+		t.Errorf("expected exactly 1 partial group fetch across 50 misses within cooldown, got %d", got)
+	}
+}
 

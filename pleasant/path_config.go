@@ -9,6 +9,11 @@ import (
 	"github.com/hashicorp/vault/sdk/framework"
 )
 
+const (
+	defaultTreeTTLSeconds      = 300
+	defaultMissCooldownSeconds = 30
+)
+
 func pathConfigAccess(b *backend) []*framework.Path {
 	return []*framework.Path{
 		&framework.Path{
@@ -27,6 +32,18 @@ func pathConfigAccess(b *backend) []*framework.Path {
 				"password": &framework.FieldSchema{
 					Type:        framework.TypeString,
 					Description: "Pleasant Password user password",
+				},
+
+				"tree_ttl": &framework.FieldSchema{
+					Type:        framework.TypeDurationSecond,
+					Default:     defaultTreeTTLSeconds,
+					Description: "Full credential tree refresh interval in seconds or Go duration (default: 300s / 5m)",
+				},
+
+				"miss_cooldown": &framework.FieldSchema{
+					Type:        framework.TypeDurationSecond,
+					Default:     defaultMissCooldownSeconds,
+					Description: "Cooldown between partial group refreshes on cache miss in seconds or Go duration (default: 30s)",
 				},
 			},
 			Callbacks: map[logical.Operation]framework.OperationFunc{
@@ -51,6 +68,12 @@ func (b *backend) readConfigAccess(ctx context.Context, storage logical.Storage)
 	if err := entry.DecodeJSON(conf); err != nil {
 		return nil, errwrap.Wrapf("error reading pleasant password access configuration: {{err}}", err)
 	}
+	if conf.TreeTTL <= 0 {
+		conf.TreeTTL = defaultTreeTTLSeconds
+	}
+	if conf.MissCooldown <= 0 {
+		conf.MissCooldown = defaultMissCooldownSeconds
+	}
 
 	return conf, nil
 }
@@ -68,9 +91,11 @@ func (b *backend) pathConfigAccessRead(ctx context.Context, req *logical.Request
 
 	return &logical.Response{
 		Data: map[string]interface{}{
-			"url": conf.Url,
-			"user_name":  conf.UserName,
-			"password":  conf.Password,
+			"url":           conf.Url,
+			"user_name":     conf.UserName,
+			"password":      conf.Password,
+			"tree_ttl":      conf.TreeTTL,
+			"miss_cooldown": conf.MissCooldown,
 		},
 	}, nil
 }
@@ -78,11 +103,31 @@ func (b *backend) pathConfigAccessRead(ctx context.Context, req *logical.Request
 func (b *backend) pathConfigAccessWrite(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	b.Logger().Debug("pathConfigAccessWrite")
 
-	entry, err := logical.StorageEntryJSON("config/access", accessConfig{
-		Url: data.Get("url").(string),
-		UserName:  data.Get("user_name").(string),
-		Password:   data.Get("password").(string),
-	})
+	conf, _ := b.readConfigAccess(ctx, req.Storage)
+	if conf == nil {
+		conf = &accessConfig{
+			TreeTTL:      defaultTreeTTLSeconds,
+			MissCooldown: defaultMissCooldownSeconds,
+		}
+	}
+
+	if v, ok := data.GetOk("url"); ok {
+		conf.Url = v.(string)
+	}
+	if v, ok := data.GetOk("user_name"); ok {
+		conf.UserName = v.(string)
+	}
+	if v, ok := data.GetOk("password"); ok {
+		conf.Password = v.(string)
+	}
+	if v, ok := data.GetOk("tree_ttl"); ok && v.(int) > 0 {
+		conf.TreeTTL = v.(int)
+	}
+	if v, ok := data.GetOk("miss_cooldown"); ok && v.(int) > 0 {
+		conf.MissCooldown = v.(int)
+	}
+
+	entry, err := logical.StorageEntryJSON("config/access", *conf)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +142,9 @@ func (b *backend) pathConfigAccessWrite(ctx context.Context, req *logical.Reques
 }
 
 type accessConfig struct {
-	Url  string `json:"url"`
-	UserName string `json:"user_name"`
-	Password   string `json:"password"`
+	Url          string `json:"url"`
+	UserName     string `json:"user_name"`
+	Password     string `json:"password"`
+	TreeTTL      int    `json:"tree_ttl,omitempty"`
+	MissCooldown int    `json:"miss_cooldown,omitempty"`
 }
