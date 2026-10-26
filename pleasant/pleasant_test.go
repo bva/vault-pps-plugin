@@ -476,7 +476,9 @@ func TestConfigAccessLifecycle(t *testing.T) {
 	if resp.Data["url"] != "https://pps.example.com" ||
 		resp.Data["user_name"] != "pps_user" ||
 		resp.Data["password"] != "pps_secret" ||
-		resp.Data["tree_ttl"] != 300 {
+		resp.Data["tree_ttl"] != 300 ||
+		resp.Data["miss_cooldown"] != 30 ||
+		resp.Data["experimental_invalidate_on_miss"] != false {
 		t.Fatalf("unexpected config/access data: %#v", resp.Data)
 	}
 
@@ -486,7 +488,9 @@ func TestConfigAccessLifecycle(t *testing.T) {
 		Path:      "config/access",
 		Storage:   storage,
 		Data: map[string]interface{}{
-			"tree_ttl": "10m",
+			"tree_ttl":                        "10m",
+			"miss_cooldown":                   "45s",
+			"experimental_invalidate_on_miss": true,
 		},
 	}
 	if _, err := b.HandleRequest(ctx, updateTimingsReq); err != nil {
@@ -500,7 +504,9 @@ func TestConfigAccessLifecycle(t *testing.T) {
 	if resp.Data["url"] != "https://pps.example.com" ||
 		resp.Data["user_name"] != "pps_user" ||
 		resp.Data["password"] != "pps_secret" ||
-		resp.Data["tree_ttl"] != 600 {
+		resp.Data["tree_ttl"] != 600 ||
+		resp.Data["miss_cooldown"] != 45 ||
+		resp.Data["experimental_invalidate_on_miss"] != true {
 		t.Fatalf("unexpected config/access data after partial update: %#v", resp.Data)
 	}
 }
@@ -901,12 +907,12 @@ func TestSessionReturnsErrorWhenInitialLoginFails(t *testing.T) {
 	}
 }
 
-func TestCacheMissDoesNotQueryPPS(t *testing.T) {
+func TestCacheMissDoesNotQueryPPSByDefault(t *testing.T) {
 	ctx := context.Background()
 	mock := newMockPPSServer(t)
 	b, storage := setupTestBackend(t, mock.server.URL)
 
-	// 1. Prime initial root tree cache
+	// 1. Prime initial root tree cache (experimental_invalidate_on_miss is false by default)
 	_, err := b.HandleRequest(ctx, &logical.Request{
 		Operation: logical.ListOperation,
 		Path:      "Shared_Folders/abb01p",
@@ -944,7 +950,158 @@ func TestCacheMissDoesNotQueryPPS(t *testing.T) {
 		t.Errorf("expected full root treeCalls to remain 1, got %d", got)
 	}
 	if got := atomic.LoadInt32(&mock.groupCalls); got != 0 {
-		t.Errorf("expected 0 partial group calls on cache misses, got %d", got)
+		t.Errorf("expected 0 partial group calls on cache misses when experimental_invalidate_on_miss=false, got %d", got)
+	}
+}
+
+func enableExperimentalInvalidateOnMiss(t *testing.T, b *backend, storage logical.Storage) {
+	t.Helper()
+	_, err := b.HandleRequest(context.Background(), &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "config/access",
+		Storage:   storage,
+		Data: map[string]interface{}{
+			"experimental_invalidate_on_miss": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed enabling experimental_invalidate_on_miss: %v", err)
+	}
+}
+
+func TestReadReloadsParentGroupOnCacheMiss(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+	enableExperimentalInvalidateOnMiss(t, b, storage)
+
+	// 1. Prime initial root tree cache
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders/abb01p",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+	if got := atomic.LoadInt32(&mock.treeCalls); got != 1 {
+		t.Fatalf("expected 1 initial root tree fetch, got %d", got)
+	}
+
+	// 2. Simulate DBA Job 1 creating a new credential directly in PPS inside Shared_Folders/abb01p
+	mock.mu.Lock()
+	grp := findGroupByID(&mock.root, "grp-db1")
+	grp.Credentials = append(grp.Credentials, Credential{
+		Id:       "cred-dba-new",
+		Name:     "DBA_NEW_SECRET",
+		Username: "DBA_USER",
+		GroupId:  "grp-db1",
+	})
+	mock.passwords["cred-dba-new"] = "dba-secret-pass"
+	mock.mu.Unlock()
+
+	// 3. DBA Job 2 immediately reads the newly created secret via Vault.
+	// Should trigger partial refresh of grp-db1 (not full root tree) and return the secret.
+	resp, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ReadOperation,
+		Path:      "Shared_Folders/abb01p/DBA_NEW_SECRET",
+		Storage:   storage,
+	})
+	if err != nil || resp == nil {
+		t.Fatalf("expected read of newly created secret to succeed via partial group reload, got err=%v resp=%#v", err, resp)
+	}
+	if resp.Data["Password"] != "dba-secret-pass" || resp.Data["Username"] != "DBA_USER" {
+		t.Fatalf("unexpected secret data after partial reload: %#v", resp.Data)
+	}
+	if got := atomic.LoadInt32(&mock.treeCalls); got != 1 {
+		t.Errorf("expected full root treeCalls to remain 1, got %d", got)
+	}
+	if got := atomic.LoadInt32(&mock.groupCalls); got != 1 {
+		t.Errorf("expected 1 partial group fetch (grp-db1), got %d", got)
+	}
+}
+
+func TestCreateInNewlyCreatedExternalFolderReloadsParentGroup(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+	enableExperimentalInvalidateOnMiss(t, b, storage)
+
+	// 1. Prime initial root tree cache
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+
+	// 2. Simulate DBA creating a new folder Shared_Folders/abb02p directly in PPS
+	mock.mu.Lock()
+	shared := findGroupByID(&mock.root, "grp-shared")
+	shared.Children = append(shared.Children, CredentialGroup{
+		Id:       "grp-db2",
+		Name:     "abb02p",
+		ParentId: "grp-shared",
+	})
+	mock.mu.Unlock()
+
+	// 3. Immediately create a secret inside Shared_Folders/abb02p via Vault
+	createResp, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.CreateOperation,
+		Path:      "Shared_Folders/abb02p/APP_SCHEMA",
+		Storage:   storage,
+		Data: map[string]interface{}{
+			"Username": "APP_SCHEMA",
+			"Password": "app-password-2",
+		},
+	})
+	if err != nil || createResp == nil {
+		t.Fatalf("expected create inside externally created folder to succeed, got err=%v resp=%#v", err, createResp)
+	}
+	if createResp.Data["Password"] != "app-password-2" {
+		t.Fatalf("unexpected created password: %#v", createResp.Data)
+	}
+	if got := atomic.LoadInt32(&mock.treeCalls); got != 1 {
+		t.Errorf("expected full root treeCalls to remain 1, got %d", got)
+	}
+}
+
+func TestRepeatedCacheMissesWithinCooldownDoNotStormPPS(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+	enableExperimentalInvalidateOnMiss(t, b, storage)
+
+	// Prime initial tree cache
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+	if got := atomic.LoadInt32(&mock.groupCalls); got != 0 {
+		t.Fatalf("expected 0 partial group calls initially, got %d", got)
+	}
+
+	// Simulate 50 rapid misses under Shared_Folders (e.g. non-existent DB folders)
+	for i := 0; i < 50; i++ {
+		_, err := b.HandleRequest(ctx, &logical.Request{
+			Operation: logical.ListOperation,
+			Path:      fmt.Sprintf("Shared_Folders/missing_db_%d", i),
+			Storage:   storage,
+		})
+		if err != logical.ErrUnsupportedPath {
+			t.Fatalf("expected ErrUnsupportedPath on missing folder, got %v", err)
+		}
+	}
+
+	// Only the first miss should trigger a partial group refresh of Shared_Folders
+	if got := atomic.LoadInt32(&mock.groupCalls); got != 1 {
+		t.Errorf("expected exactly 1 partial group fetch across 50 misses within cooldown, got %d", got)
 	}
 }
 

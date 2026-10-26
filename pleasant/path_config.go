@@ -10,7 +10,8 @@ import (
 )
 
 const (
-	defaultTreeTTLSeconds = 300
+	defaultTreeTTLSeconds      = 300
+	defaultMissCooldownSeconds = 30
 )
 
 func pathConfigAccess(b *backend) []*framework.Path {
@@ -38,6 +39,18 @@ func pathConfigAccess(b *backend) []*framework.Path {
 					Default:     defaultTreeTTLSeconds,
 					Description: "Full credential tree refresh interval in seconds or Go duration (default: 300s / 5m)",
 				},
+
+				"miss_cooldown": &framework.FieldSchema{
+					Type:        framework.TypeDurationSecond,
+					Default:     defaultMissCooldownSeconds,
+					Description: "Cooldown between partial group refreshes on cache miss in seconds or Go duration (default: 30s)",
+				},
+
+				"experimental_invalidate_on_miss": &framework.FieldSchema{
+					Type:        framework.TypeBool,
+					Default:     false,
+					Description: "When true, reloads the nearest cached parent group from PPS on Read/List cache miss (default: false)",
+				},
 			},
 			Callbacks: map[logical.Operation]framework.OperationFunc{
 				logical.ReadOperation:   b.pathConfigAccessRead,
@@ -64,6 +77,9 @@ func (b *backend) readConfigAccess(ctx context.Context, storage logical.Storage)
 	if conf.TreeTTL <= 0 {
 		conf.TreeTTL = defaultTreeTTLSeconds
 	}
+	if conf.MissCooldown <= 0 {
+		conf.MissCooldown = defaultMissCooldownSeconds
+	}
 
 	return conf, nil
 }
@@ -81,10 +97,12 @@ func (b *backend) pathConfigAccessRead(ctx context.Context, req *logical.Request
 
 	return &logical.Response{
 		Data: map[string]interface{}{
-			"url":       conf.Url,
-			"user_name": conf.UserName,
-			"password":  conf.Password,
-			"tree_ttl":  conf.TreeTTL,
+			"url":                             conf.Url,
+			"user_name":                       conf.UserName,
+			"password":                        conf.Password,
+			"tree_ttl":                        conf.TreeTTL,
+			"miss_cooldown":                   conf.MissCooldown,
+			"experimental_invalidate_on_miss": conf.ExperimentalInvalidateOnMiss,
 		},
 	}, nil
 }
@@ -95,7 +113,8 @@ func (b *backend) pathConfigAccessWrite(ctx context.Context, req *logical.Reques
 	conf, _ := b.readConfigAccess(ctx, req.Storage)
 	if conf == nil {
 		conf = &accessConfig{
-			TreeTTL: defaultTreeTTLSeconds,
+			TreeTTL:      defaultTreeTTLSeconds,
+			MissCooldown: defaultMissCooldownSeconds,
 		}
 	}
 
@@ -110,6 +129,12 @@ func (b *backend) pathConfigAccessWrite(ctx context.Context, req *logical.Reques
 	}
 	if v, ok := data.GetOk("tree_ttl"); ok && v.(int) > 0 {
 		conf.TreeTTL = v.(int)
+	}
+	if v, ok := data.GetOk("miss_cooldown"); ok && v.(int) > 0 {
+		conf.MissCooldown = v.(int)
+	}
+	if v, ok := data.GetOk("experimental_invalidate_on_miss"); ok {
+		conf.ExperimentalInvalidateOnMiss = v.(bool)
 	}
 
 	entry, err := logical.StorageEntryJSON("config/access", *conf)
@@ -127,8 +152,10 @@ func (b *backend) pathConfigAccessWrite(ctx context.Context, req *logical.Reques
 }
 
 type accessConfig struct {
-	Url      string `json:"url"`
-	UserName string `json:"user_name"`
-	Password string `json:"password"`
-	TreeTTL  int    `json:"tree_ttl,omitempty"`
+	Url                          string `json:"url"`
+	UserName                     string `json:"user_name"`
+	Password                     string `json:"password"`
+	TreeTTL                      int    `json:"tree_ttl,omitempty"`
+	MissCooldown                 int    `json:"miss_cooldown,omitempty"`
+	ExperimentalInvalidateOnMiss bool   `json:"experimental_invalidate_on_miss,omitempty"`
 }
