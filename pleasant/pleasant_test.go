@@ -30,10 +30,12 @@ type mockPPSServer struct {
 	pwdRawBody   string
 	pwdDelay     time.Duration
 
-	authCalls  int32
-	treeCalls  int32
-	groupCalls int32
-	pwdCalls   int32
+	authCalls      int32
+	treeCalls      int32
+	groupCalls     int32
+	pwdCalls       int32
+	pwdInFlight    int32
+	pwdMaxInFlight int32
 }
 
 func newMockPPSServer(t *testing.T) *mockPPSServer {
@@ -273,6 +275,14 @@ func (m *mockPPSServer) handleCredential(w http.ResponseWriter, r *http.Request)
 
 	if len(parts) == 2 && parts[1] == "password" && r.Method == http.MethodGet {
 		atomic.AddInt32(&m.pwdCalls, 1)
+		inFlight := atomic.AddInt32(&m.pwdInFlight, 1)
+		for {
+			prev := atomic.LoadInt32(&m.pwdMaxInFlight)
+			if inFlight <= prev || atomic.CompareAndSwapInt32(&m.pwdMaxInFlight, prev, inFlight) {
+				break
+			}
+		}
+		defer atomic.AddInt32(&m.pwdInFlight, -1)
 		credID := parts[0]
 
 		m.mu.Lock()
@@ -479,7 +489,8 @@ func TestConfigAccessLifecycle(t *testing.T) {
 		resp.Data["tree_ttl"] != 300 ||
 		resp.Data["miss_cooldown"] != 30 ||
 		resp.Data["http_timeout"] != 30 ||
-		resp.Data["experimental_invalidate_on_miss"] != false {
+		resp.Data["experimental_invalidate_on_miss"] != false ||
+		resp.Data["experimental_parallel_requests"] != false {
 		t.Fatalf("unexpected config/access data: %#v", resp.Data)
 	}
 
@@ -493,6 +504,7 @@ func TestConfigAccessLifecycle(t *testing.T) {
 			"miss_cooldown":                   "45s",
 			"http_timeout":                    "90s",
 			"experimental_invalidate_on_miss": true,
+			"experimental_parallel_requests":  true,
 		},
 	}
 	if _, err := b.HandleRequest(ctx, updateTimingsReq); err != nil {
@@ -509,7 +521,8 @@ func TestConfigAccessLifecycle(t *testing.T) {
 		resp.Data["tree_ttl"] != 600 ||
 		resp.Data["miss_cooldown"] != 45 ||
 		resp.Data["http_timeout"] != 90 ||
-		resp.Data["experimental_invalidate_on_miss"] != true {
+		resp.Data["experimental_invalidate_on_miss"] != true ||
+		resp.Data["experimental_parallel_requests"] != true {
 		t.Fatalf("unexpected config/access data after partial update: %#v", resp.Data)
 	}
 }
@@ -1242,13 +1255,77 @@ func TestPasswordRead404RefreshesParentGroupAndReturnsUnsupportedPath(t *testing
 	}
 }
 
-func TestConcurrentPasswordReadsRunInParallel(t *testing.T) {
+func TestDefaultSerializesPasswordReads(t *testing.T) {
 	ctx := context.Background()
 	mock := newMockPPSServer(t)
 	b, storage := setupTestBackend(t, mock.server.URL)
 
 	// Prime tree cache first
 	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.ListOperation,
+		Path:      "Shared_Folders/abb01p",
+		Storage:   storage,
+	})
+	if err != nil {
+		t.Fatalf("failed initial list: %v", err)
+	}
+
+	mock.mu.Lock()
+	mock.pwdDelay = 15 * time.Millisecond
+	mock.mu.Unlock()
+
+	const workers = 6
+	errCh := make(chan error, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			resp, rErr := b.HandleRequest(ctx, &logical.Request{
+				Operation: logical.ReadOperation,
+				Path:      "Shared_Folders/abb01p/ABBPRD_app",
+				Storage:   storage,
+			})
+			if rErr != nil {
+				errCh <- rErr
+				return
+			}
+			if resp == nil || resp.Data["Password"] != "s3cret-abb01p" {
+				errCh <- logical.ErrUnsupportedPath
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for rErr := range errCh {
+		t.Fatalf("serialized read failed: %v", rErr)
+	}
+
+	if maxInFlight := atomic.LoadInt32(&mock.pwdMaxInFlight); maxInFlight != 1 {
+		t.Fatalf("expected default experimental_parallel_requests=false to serialize requests (maxInFlight=1), got %d", maxInFlight)
+	}
+}
+
+func TestConcurrentPasswordReadsRunInParallel(t *testing.T) {
+	ctx := context.Background()
+	mock := newMockPPSServer(t)
+	b, storage := setupTestBackend(t, mock.server.URL)
+
+	_, err := b.HandleRequest(ctx, &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "config/access",
+		Storage:   storage,
+		Data: map[string]interface{}{
+			"experimental_parallel_requests": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed enabling experimental_parallel_requests: %v", err)
+	}
+
+	// Prime tree cache first
+	_, err = b.HandleRequest(ctx, &logical.Request{
 		Operation: logical.ListOperation,
 		Path:      "Shared_Folders/abb01p",
 		Storage:   storage,

@@ -58,6 +58,12 @@ func pathConfigAccess(b *backend) []*framework.Path {
 					Default:     false,
 					Description: "When true, reloads the nearest cached parent group from PPS on Read/List cache miss (default: false)",
 				},
+
+				"experimental_parallel_requests": &framework.FieldSchema{
+					Type:        framework.TypeBool,
+					Default:     false,
+					Description: "When true, allows concurrent outbound HTTP requests to PPS instead of serializing them (default: false)",
+				},
 			},
 			Callbacks: map[logical.Operation]framework.OperationFunc{
 				logical.ReadOperation:   b.pathConfigAccessRead,
@@ -114,6 +120,7 @@ func (b *backend) pathConfigAccessRead(ctx context.Context, req *logical.Request
 			"miss_cooldown":                   conf.MissCooldown,
 			"http_timeout":                    conf.HTTPTimeout,
 			"experimental_invalidate_on_miss": conf.ExperimentalInvalidateOnMiss,
+			"experimental_parallel_requests":  conf.ExperimentalParallelRequests,
 		},
 	}, nil
 }
@@ -151,6 +158,9 @@ func (b *backend) pathConfigAccessWrite(ctx context.Context, req *logical.Reques
 	if v, ok := data.GetOk("experimental_invalidate_on_miss"); ok {
 		conf.ExperimentalInvalidateOnMiss = v.(bool)
 	}
+	if v, ok := data.GetOk("experimental_parallel_requests"); ok {
+		conf.ExperimentalParallelRequests = v.(bool)
+	}
 
 	entry, err := logical.StorageEntryJSON("config/access", *conf)
 	if err != nil {
@@ -174,4 +184,5 @@ type accessConfig struct {
 	MissCooldown                 int    `json:"miss_cooldown,omitempty"`
 	HTTPTimeout                  int    `json:"http_timeout,omitempty"`
 	ExperimentalInvalidateOnMiss bool   `json:"experimental_invalidate_on_miss,omitempty"`
+	ExperimentalParallelRequests bool   `json:"experimental_parallel_requests,omitempty"`
 }

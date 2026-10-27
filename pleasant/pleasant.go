@@ -96,11 +96,13 @@ type Pleasant struct {
 
 	authMu sync.Mutex
 	treeMu sync.Mutex
+	httpMu sync.Mutex
 
 	treeTTL          time.Duration
 	missCooldown     time.Duration
 	httpTimeout      time.Duration
 	invalidateOnMiss bool
+	parallelRequests bool
 	lastMissRefresh  map[string]time.Time
 
 	stopCh   chan struct{}
@@ -226,12 +228,22 @@ func (p *Pleasant) GetAccessToken() string {
 	return auth.AccessToken
 }
 
+func (p *Pleasant) doHTTP(fn func() (*resty.Response, error)) (*resty.Response, error) {
+	if !p.parallelRequests {
+		p.httpMu.Lock()
+		defer p.httpMu.Unlock()
+	}
+	return fn()
+}
+
 func (p *Pleasant) requestAuth(username string, password string) (*AuthSuccess, error) {
-	resp, err := p.resty.R().SetFormData(map[string]string{
-		"grant_type": "password",
-		"username":   username,
-		"password":   password,
-	}).SetResult(AuthSuccess{}).Post("/OAuth2/Token")
+	resp, err := p.doHTTP(func() (*resty.Response, error) {
+		return p.resty.R().SetFormData(map[string]string{
+			"grant_type": "password",
+			"username":   username,
+			"password":   password,
+		}).SetResult(AuthSuccess{}).Post("/OAuth2/Token")
+	})
 
 	if err != nil {
 		return nil, err
@@ -285,8 +297,11 @@ func (p *Pleasant) RequestAuth(username string, password string) *AuthSuccess {
 }
 
 func (p *Pleasant) executeWithAuthRetry(doReq func(token string) (*resty.Response, error)) (*resty.Response, error) {
-	usedToken := p.GetAccessToken()
-	resp, err := doReq(usedToken)
+	var usedToken string
+	resp, err := p.doHTTP(func() (*resty.Response, error) {
+		usedToken = p.GetAccessToken()
+		return doReq(usedToken)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +310,9 @@ func (p *Pleasant) executeWithAuthRetry(doReq func(token string) (*resty.Respons
 		if authErr != nil {
 			return resp, fmt.Errorf("PPS re-authentication after 401 failed: %w", authErr)
 		}
-		return doReq(refreshed.AccessToken)
+		return p.doHTTP(func() (*resty.Response, error) {
+			return doReq(refreshed.AccessToken)
+		})
 	}
 	return resp, nil
 }

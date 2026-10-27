@@ -36,6 +36,7 @@ vault write pps/config/access url="$PPS_URL" user_name="$PPS_USER" password="$PP
 | `miss_cooldown`                   | `30s`   | Cooldown between partial group refreshes on cache miss in seconds or Go duration (`30s`)    |
 | `http_timeout`                    | `30s`   | HTTP client timeout for Pleasant Password Server requests in seconds or Go duration (`30s`) |
 | `experimental_invalidate_on_miss` | `false` | When `true`, reloads the nearest cached parent group from PPS on Read/List cache miss       |
+| `experimental_parallel_requests`  | `false` | When `true`, allows concurrent outbound HTTP requests to PPS instead of serializing them    |
 
 
 Accessing Pleasant Password secrets from Vault:
